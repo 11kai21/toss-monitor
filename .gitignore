@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+toss_state.json
+toss_state.json.bak
+toss_line_state.json
+toss_line_state.json.bak
+toss_runtime.json
+toss_runtime.json.bak
+toss_status.txt
+toss_trace.txt
+
+*.key
+*.pem
