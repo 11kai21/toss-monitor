@@ -1,0 +1,15 @@
+name: TOSS Monitor Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: GitHub Actionsテスト
+        run: |
+          echo "GitHub Actions は正常に起動しました"
+          python --version
+          uname -a
