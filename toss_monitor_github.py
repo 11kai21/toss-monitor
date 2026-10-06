@@ -31,8 +31,19 @@ def api_request(method, path, body=None):
     try:
         with urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8")
-    except (HTTPError, URLError) as exc:
-        raise RuntimeError(f"Cloudflare API request failed: {exc}") from exc
+    except HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        # 認証情報そのものは絶対にログへ出さない。
+        if len(detail) > 1000:
+            detail = detail[:1000] + "...(truncated)"
+        raise RuntimeError(
+            f"Cloudflare API HTTP {exc.code}: {detail or exc.reason}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(f"Cloudflare API connection failed: {exc}") from exc
 
     try:
         return json.loads(raw)
