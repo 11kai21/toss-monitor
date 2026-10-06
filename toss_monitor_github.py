@@ -114,6 +114,23 @@ def save_state_to_cloudflare(state):
     )
 
 
+def save_runtime_to_cloudflare(runtime):
+    if not isinstance(runtime, dict):
+        raise RuntimeError("TOSS runtimeがJSONオブジェクトではありません")
+
+    response = api_request("PUT", "/api/runtime", runtime)
+    if response.get("ok") is not True:
+        raise RuntimeError(
+            "Cloudflare KVへのruntime保存に失敗しました: "
+            + json.dumps(response, ensure_ascii=False)
+        )
+
+    print(
+        "Cloudflare KV runtime保存成功: "
+        f"bytes={response.get("bytes")}"
+    )
+
+
 def main():
     force_scan = os.environ.get("TOSS_FORCE_SCAN") == "1"
 
@@ -149,8 +166,13 @@ def main():
         write_local_state(previous_state)
         print(f"KVから前回状態を復元しました: statuses={len(previous_state['statuses'])}")
 
-    with sync_playwright() as playwright:
-        monitor.scan_once(playwright)
+    try:
+        with sync_playwright() as playwright:
+            monitor.scan_once(playwright)
+    finally:
+        runtime = monitor.load_runtime()
+        if runtime:
+            save_runtime_to_cloudflare(runtime)
 
     runtime = monitor.load_runtime()
     if runtime.get("monitor_status") != "ok":
