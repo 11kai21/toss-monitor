@@ -132,8 +132,6 @@ def save_runtime_to_cloudflare(runtime):
 
 
 def main():
-    force_scan = os.environ.get("TOSS_FORCE_SCAN") == "1"
-
     monitor.TRACE_FILE.write_text("", encoding="utf-8")
     process_started_at = monitor.now_iso()
 
@@ -150,7 +148,7 @@ def main():
 
     print(f"Cloudflare監視設定: monitor_enabled={monitor_enabled}")
 
-    if not force_scan and not monitor_enabled:
+    if not monitor_enabled:
         print("監視OFFのため、今回はTOSSへアクセスしません。")
         return
 
