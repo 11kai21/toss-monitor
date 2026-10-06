@@ -130,7 +130,7 @@ def main():
         print("KVに前回状態がないため、初回取得として実行します。")
     else:
         write_local_state(previous_state)
-        print(f"KVから前回状態を復元しました: statuses={len(previous_state["statuses"])}")
+        print(f"KVから前回状態を復元しました: statuses={len(previous_state['statuses'])}")
 
     with sync_playwright() as playwright:
         monitor.scan_once(playwright)
@@ -146,7 +146,7 @@ def main():
 
     print(
         "TOSS取得＋KV保存 完了: "
-        f"statuses={len(current_state["statuses"])}"
+        f"statuses={len(current_state['statuses'])}"
     )
 
 
