@@ -17,17 +17,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "${TOSS_API_TOKEN}" ]; then
+            echo "TOSS_API_TOKEN is missing or unavailable to this workflow."
+            exit 1
+          fi
+
           response="$(curl -fsS \
             -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
             "https://toss-monitor-api.nbakaikai.workers.dev/health")"
 
-          echo "$response"
+          echo "${response}"
 
-          echo "$response" | grep -q '"ok": true'
-          echo "$response" | grep -q '"kv_bound": true'
-          echo "$response" | grep -q '"token_configured": true'
+          echo "${response}" | grep -q '"ok": true'
+          echo "${response}" | grep -q '"kv_bound": true'
+          echo "${response}" | grep -q '"token_configured": true'
 
-      - name: Test KV config read and write
+      - name: Test KV config read/write without changing production setting
         env:
           TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
         run: |
@@ -38,26 +43,38 @@ jobs:
             "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
 
           echo "Initial config:"
-          echo "$before"
+          echo "${before}"
+
+          monitor_enabled="$(printf '%s' "${before}" | jq -r '.monitor_enabled')"
+
+          if [ "${monitor_enabled}" != "true" ] && [ "${monitor_enabled}" != "false" ]; then
+            echo "monitor_enabled is missing or invalid."
+            exit 1
+          fi
 
           put_response="$(curl -fsS \
             -X PUT \
             -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data '{"monitor_enabled":false}' \
+            --data "{\"monitor_enabled\":${monitor_enabled}}" \
             "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
 
           echo "Write response:"
-          echo "$put_response"
+          echo "${put_response}"
 
-          echo "$put_response" | grep -q '"ok": true'
-          echo "$put_response" | grep -q '"monitor_enabled": false'
+          echo "${put_response}" | grep -q '"ok": true'
+          echo "${put_response}" | grep -q "\"monitor_enabled\": ${monitor_enabled}"
 
           after="$(curl -fsS \
             -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
             "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
 
           echo "Read-after-write:"
-          echo "$after"
+          echo "${after}"
 
-          echo "$after" | grep -q '"monitor_enabled": false'
+          after_enabled="$(printf '%s' "${after}" | jq -r '.monitor_enabled')"
+
+          if [ "${after_enabled}" != "${monitor_enabled}" ]; then
+            echo "Production monitor_enabled changed unexpectedly."
+            exit 1
+          fi
