@@ -1,0 +1,102 @@
+name: TOSS Preflight Validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Compile Python sources
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            toss_monitor_github.py \
+            toss_monitor_once.py \
+            toss_monitor_test_parallel_verified.py
+
+      - name: Verify required Python dependency
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -c "import playwright; print('playwright import: OK')"
+
+      - name: Verify critical TOSS configuration
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("toss_monitor_test_parallel_verified.py")
+          tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+          values = {}
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                  name = node.targets[0].id
+                  try:
+                      values[name] = ast.literal_eval(node.value)
+                  except Exception:
+                      pass
+
+          assert values["DAYS_AHEAD"] == 13, values.get("DAYS_AHEAD")
+          assert values["CLOSED_WEEKDAYS"] == {0}, values.get("CLOSED_WEEKDAYS")
+          assert values["CHECK_INTERVAL_SECONDS"] == 5 * 60, values.get("CHECK_INTERVAL_SECONDS")
+          assert values["HEADLESS"] is True, values.get("HEADLESS")
+          assert values["INITIAL_SCAN_NOTIFY"] is False, values.get("INITIAL_SCAN_NOTIFY")
+          assert values["PURPOSES"] == ["バスケットボール", "バスケ（ハーフコート）"], values.get("PURPOSES")
+          assert values["ALLOWED_ACTION_FIELDS"] == {
+              "layoutChildBody:childForm:doChangeDate",
+              "layoutChildBody:childForm:doPager",
+          }, values.get("ALLOWED_ACTION_FIELDS")
+
+          print("Critical TOSS configuration: OK")
+          PY
+
+      - name: Verify GitHub bridge uses remote KV state
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path("toss_monitor_github.py").read_text(encoding="utf-8")
+          required = [
+              'API_BASE = "https://toss-monitor-api.nbakaikai.workers.dev"',
+              'API_TOKEN_ENV = "TOSS_API_TOKEN"',
+              'GET", "/api/state"',
+              'PUT", "/api/state"',
+              'monitor.scan_once(playwright)',
+              'runtime.get("monitor_status") != "ok"',
+          ]
+          for item in required:
+              assert item in text, item
+          print("GitHub-to-KV bridge: OK")
+          PY
+
+      - name: Verify secret/state files are excluded from Git
+        run: |
+          set -euo pipefail
+          for pattern in '.env' '.env.*' 'toss_state.json' 'toss_state.json.bak' 'toss_line_state.json' 'toss_line_state.json.bak' '*.key' '*.pem'; do
+            grep -Fxq "$pattern" .gitignore
+          done
+          echo "Secret/state exclusion rules: OK"
+
+      - name: Validate workflow YAML files
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |f| YAML.load_file(f); puts "#{f}: YAML OK" }'
