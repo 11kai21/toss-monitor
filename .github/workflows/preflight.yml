@@ -80,6 +80,9 @@ jobs:
               'API_TOKEN_ENV = "TOSS_API_TOKEN"',
               'GET", "/api/state"',
               'PUT", "/api/state"',
+              'GET", "/api/config"',
+              'PUT", "/api/runtime"',
+              'save_runtime_to_cloudflare',
               'monitor.scan_once(playwright)',
               'runtime.get("monitor_status") != "ok"',
           ]
@@ -87,6 +90,17 @@ jobs:
               assert item in text, item
           print("GitHub-to-KV bridge: OK")
           PY
+
+      - name: Verify isolated LINE Worker
+        run: |
+          set -euo pipefail
+          node --check cloudflare/toss-line-bot.js
+          grep -Fq 'https://www.cm1.eprs.jp/TOSS/web/view/user/c005RsvEmptyState.html' cloudflare/toss-line-bot.js
+          grep -Fq 'const DAY_MAX = 13;' cloudflare/toss-line-bot.js
+          grep -Fq 'const HOURS = [9,13,17];' cloudflare/toss-line-bot.js
+          ! grep -Fqi 'wedding-ticket' cloudflare/toss-line-bot.js
+          ! grep -Fqi 'wedding' cloudflare/toss-line-bot.js
+          echo "Isolated LINE Worker: OK"
 
       - name: Verify secret/state files are excluded from Git
         run: |
