@@ -1,8 +1,7 @@
 name: TOSS Preflight Validation
 
 on:
-  push:
-  pull_request:
+  # 本番化時に push / pull_request を復活させる。
   workflow_dispatch:
 
 permissions:
