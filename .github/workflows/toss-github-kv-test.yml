@@ -27,6 +27,17 @@ jobs:
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
 
+      - name: Verify secret is available
+        env:
+          TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOSS_API_TOKEN" ]; then
+            echo "TOSS_API_TOKEN is missing or unavailable to this workflow."
+            exit 1
+          fi
+          echo "TOSS_API_TOKEN is available (length=$(printf %s "$TOSS_API_TOKEN" | wc -c))."
+
       - name: Run TOSS once and save state to KV
         env:
           TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
