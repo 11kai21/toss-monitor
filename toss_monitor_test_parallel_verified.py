@@ -998,3 +998,1284 @@ def checkbox_label_text(cb):
             const norm = s => (s || '').replace(/\\s/g, '');
 
             const label = e.closest('label');
+            if (label) return norm(label.innerText || '');
+
+            if (e.id) {
+                const forLabel = document.querySelector(
+                    `label[for="${CSS.escape(e.id)}"]`
+                );
+                if (forLabel) return norm(forLabel.innerText || '');
+            }
+
+            const parent = e.parentElement;
+            if (parent) {
+                for (const child of [...parent.children]) {
+                    if (child === e) continue;
+                    const t = norm(child.innerText || child.textContent || '');
+                    if (t) return t;
+                }
+            }
+
+            return '';
+        }
+        """
+    )
+
+
+def find_checkbox(page, keyword):
+    target = normalize_text(keyword)
+    cbs = page.locator("input[type='checkbox']")
+
+    for i in range(cbs.count()):
+        cb = cbs.nth(i)
+        try:
+            if not cb.is_visible():
+                continue
+            if checkbox_label_text(cb) == target:
+                return cb
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        f"「{keyword}」のチェックボックスを完全一致で特定できませんでした。"
+    )
+
+
+def click_purpose(page):
+    """目的検索画面へ移動する。通常の画面クリックを優先し、失敗時は同じ公開GET画面へ移動する。"""
+    candidates = page.locator("a, input, button, td, span, div, img")
+    found = []
+
+    # まず通常の「目的から」操作を試す。
+    for i in range(candidates.count()):
+        try:
+            el = candidates.nth(i)
+            if not el.is_visible():
+                continue
+
+            values = {
+                normalize_text(el.inner_text()),
+                normalize_text(el.get_attribute("value")),
+                normalize_text(el.get_attribute("alt")),
+                normalize_text(el.get_attribute("title")),
+            }
+            if "目的から" in values:
+                found.append(el)
+        except Exception:
+            continue
+
+    for el in reversed(found):
+        try:
+            el.click(force=True)
+            page.wait_for_timeout(2500)
+            if "rsvPurposeSearch.html" in page.url:
+                return
+        except Exception:
+            continue
+
+    # クリックが安定しない場合は、今回の通信ログで確認済みの
+    # 通常の目的検索画面URLへGETする。フォーム送信ではない。
+    purpose_url = f"{BASE_URL}/TOSS/web/view/user/rsvPurposeSearch.html"
+    trace("目的検索画面への通常GETへ切り替えます。")
+    page.goto(purpose_url, wait_until="domcontentloaded", timeout=30000)
+
+    try:
+        page.locator("input[type='checkbox']").first.wait_for(
+            state="attached",
+            timeout=15000,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"目的検索画面の読み込みを確認できませんでした: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    # te-uniquekey のクエリ文字列は正常なセッション識別情報なので、
+    # URL全体ではなくパスだけを確認する。
+    actual_path = urlsplit(page.url).path
+    expected_path = "/TOSS/web/view/user/c005RsvPurposeSearch.html"
+    if actual_path != expected_path:
+        raise RuntimeError(
+            f"目的検索画面への遷移後パスが想定外です: {actual_path!r} "
+            f"(URL={page.url})"
+        )
+
+
+def set_purposes(page):
+    for keyword in PURPOSES:
+        cb = find_checkbox(page, keyword)
+        if not cb.is_checked():
+            cb.check(force=True)
+
+    volleyball = find_checkbox(page, "バレーボール")
+    if volleyball.is_checked():
+        volleyball.uncheck(force=True)
+
+    checked = []
+    cbs = page.locator("input[type='checkbox']:checked")
+    for i in range(cbs.count()):
+        checked.append(checkbox_label_text(cbs.nth(i)))
+
+    normalized = {normalize_text(x) for x in checked if x}
+    expected = {normalize_text(x) for x in PURPOSES}
+
+    if normalized != expected:
+        raise RuntimeError(
+            f"検索条件の確認に失敗しました。選択={checked}"
+        )
+
+
+def click_search(page):
+    elements = page.locator("input, button, a")
+    candidates = []
+
+    for i in range(elements.count()):
+        try:
+            el = elements.nth(i)
+            blob = "|".join(
+                [
+                    normalize_text(el.inner_text()),
+                    normalize_text(el.get_attribute("value")),
+                    normalize_text(el.get_attribute("onclick")),
+                ]
+            )
+            if "上記の内容で検索する" in blob:
+                candidates.append(el)
+        except Exception:
+            continue
+
+    if not candidates:
+        raise RuntimeError("「上記の内容で検索する」が見つかりませんでした。")
+
+    for el in reversed(candidates):
+        try:
+            el.click(force=True)
+            page.locator("img#emptyStateIcon").first.wait_for(
+                state="attached",
+                timeout=15000,
+            )
+            return
+        except Exception:
+            continue
+
+    raise RuntimeError("検索結果画面への移動を確認できませんでした。")
+
+
+def raise_maintenance_if_current_window(system_windows, exc):
+    """現在が告知済みメンテナンス時間帯で、実際のアクセスに失敗した場合だけメンテナンス扱いにする。"""
+    current_window = current_system_maintenance_window(system_windows)
+    if not current_window:
+        raise exc
+
+    start_dt, end_dt = current_window
+    reason = (
+        f"TOSS本体への実アクセスが失敗し、告知済みのシステムメンテナンス時間帯 "
+        f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+        "メンテナンス中と判定して監視を停止します。"
+    )
+    return ScheduledSystemMaintenanceError(reason, end_dt)
+
+
+def bootstrap_browser_session(playwright):
+    """
+    ブラウザでは通常の検索条件確立だけを行う。
+    その後は同じBrowserContextに紐づくHTTP APIへ切り替える。
+    """
+    trace("HTTP監視用のセッションをブラウザで1回だけ確立します。")
+
+    browser = playwright.chromium.launch(headless=HEADLESS)
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+
+    try:
+        ensure_not_maintenance()
+        try:
+            page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            cached_dates, cached_windows = load_cached_maintenance(load_state())
+            maintenance_error = raise_maintenance_if_current_window(
+                cached_windows,
+                RuntimeError(f"TOSSホーム画面へのアクセスに失敗しました: {type(exc).__name__}: {exc}"),
+            )
+            if isinstance(maintenance_error, ScheduledSystemMaintenanceError):
+                raise maintenance_error from exc
+            raise
+        trace(f"ブラウザ初期表示: {page.url}")
+
+        ensure_not_maintenance()
+        today = datetime.now(JST).date()
+        maintenance_dates, system_windows, notice_errors = read_maintenance_notices(page, today)
+        if today in maintenance_dates:
+            reason = (
+                f"お知らせで本日（{today.isoformat()}）がTOSS定期メンテナンス実施日と確認されました。"
+            )
+            save_maintenance_status(reason)
+            raise ScheduledMaintenanceError(reason)
+
+        # システムメンテナンスは「告知がある」だけでは停止しない。
+        # 実際にTOSSの目的検索・空き状況画面まで開けるかを試し、失敗した場合のみ
+        # 現在の告知時間帯と照合してメンテナンス中と判定する。
+        ensure_not_maintenance()
+        try:
+            click_purpose(page)
+            set_purposes(page)
+            ensure_not_maintenance()
+            click_search(page)
+        except Exception as exc:
+            maintenance_error = raise_maintenance_if_current_window(
+                system_windows,
+                RuntimeError(f"TOSSの空き状況画面へのアクセスに失敗しました: {type(exc).__name__}: {exc}"),
+            )
+            if isinstance(maintenance_error, ScheduledSystemMaintenanceError):
+                save_maintenance_status(str(maintenance_error))
+                raise maintenance_error from exc
+            raise
+
+        page.locator("img#emptyStateIcon").first.wait_for(
+            state="attached",
+            timeout=10000,
+        )
+
+        html = page.content()
+        current_url = page.url
+        user_agent = page.evaluate("navigator.userAgent")
+        browser_charset = page.evaluate("document.characterSet || document.charset || ''")
+
+        trace(f"ブラウザ検索完了: {current_url}")
+        trace(f"ブラウザが認識した文書文字コード={browser_charset or '取得不可'}")
+        trace(f"検索結果HTML長={len(html)}")
+
+        return browser, context, page, html, current_url, user_agent, browser_charset, maintenance_dates, system_windows, notice_errors
+    except Exception:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        raise
+
+
+def load_html_into_page(page, html):
+    """HTTPレスポンスをネットワークアクセスなしでDOM化する。"""
+    page.set_content(
+        html,
+        wait_until="domcontentloaded",
+        timeout=10000,
+    )
+
+
+def read_current_date(page):
+    year = page.locator("#year--").inner_text().strip()
+    month = page.locator("#month--").inner_text().strip()
+    day = page.locator("#day--").inner_text().strip()
+    text = f"{year}/{month}/{day}"
+
+    try:
+        return datetime.strptime(text, "%Y/%m/%d").date()
+    except ValueError as exc:
+        raise RuntimeError(f"DOMの日付形式が不正です: {text}") from exc
+
+
+def read_all_count(page):
+    el = page.locator(
+        "input[name='layoutChildBody:childForm:allCount']"
+    )
+    if el.count() == 0:
+        raise RuntimeError("DOMからallCountを取得できませんでした。")
+
+    try:
+        return int(el.first.get_attribute("value") or "")
+    except ValueError as exc:
+        raise RuntimeError("allCountの値が不正です。") from exc
+
+
+def extract_form_pairs(page):
+    """検索結果フォームの現在の状態をそのまま取得する。"""
+    forms = page.locator("form")
+    target_form = None
+
+    for i in range(forms.count()):
+        form = forms.nth(i)
+        if form.locator(
+            "input[name='layoutChildBody:childForm:rsvEmptyStateItemsSave']"
+        ).count() > 0:
+            target_form = form
+            break
+
+    if target_form is None:
+        raise RuntimeError("空き状況検索用フォームを特定できませんでした。")
+
+    method = (target_form.get_attribute("method") or "get").lower()
+    if method != "post":
+        raise RuntimeError(
+            f"検索結果フォームのmethodがPOSTではありません: {method}"
+        )
+
+    action = target_form.get_attribute("action") or ""
+    if action:
+        if action.startswith(("http://", "https://")):
+            if not action.startswith(BASE_URL + EMPTY_STATE_PATH):
+                raise RuntimeError(f"許可外のフォーム送信先です: {action}")
+        else:
+            normalized = action.split("?", 1)[0]
+            if not normalized.endswith(EMPTY_STATE_PATH):
+                raise RuntimeError(f"許可外のフォーム送信先です: {action}")
+
+    pairs = target_form.evaluate(
+        """
+        form => {
+            const out = [];
+            const add = (name, value) => {
+                if (name) out.push([name, value ?? '']);
+            };
+
+            for (const el of form.querySelectorAll('input[name]')) {
+                const name = el.getAttribute('name');
+                const type = (el.getAttribute('type') || 'text').toLowerCase();
+
+                if (['submit', 'button', 'image', 'reset', 'file'].includes(type)) {
+                    continue;
+                }
+                if ((type === 'checkbox' || type === 'radio') && !el.checked) {
+                    continue;
+                }
+                add(name, el.value || '');
+            }
+
+            for (const el of form.querySelectorAll('select[name]')) {
+                for (const option of [...el.options]) {
+                    if (option.selected) {
+                        add(
+                            el.getAttribute('name'),
+                            option.value ?? option.textContent ?? ''
+                        );
+                    }
+                }
+            }
+
+            for (const el of form.querySelectorAll('textarea[name]')) {
+                add(el.getAttribute('name'), el.value || el.textContent || '');
+            }
+
+            return out;
+        }
+        """
+    )
+
+    pairs = [(str(name), str(value)) for name, value in pairs]
+
+    if not any(
+        name == "layoutChildBody:childForm:rsvEmptyStateItemsSave"
+        for name, _ in pairs
+    ):
+        raise RuntimeError("検索結果フォームの必須状態データが取得できませんでした。")
+
+    return pairs
+
+
+def build_readonly_post_data(page, action_field, extra_fields):
+    if action_field not in ALLOWED_ACTION_FIELDS:
+        raise RuntimeError(f"許可されていないHTTP操作です: {action_field}")
+
+    pairs = extract_form_pairs(page)
+    pairs = [
+        (name, value)
+        for name, value in pairs
+        if name not in ALLOWED_ACTION_FIELDS
+    ]
+
+    data = list(pairs)
+
+    for key, value in extra_fields.items():
+        replaced = False
+        new_data = []
+        for name, old_value in data:
+            if name == key:
+                if not replaced:
+                    new_data.append((name, str(value)))
+                    replaced = True
+            else:
+                new_data.append((name, old_value))
+        if not replaced:
+            new_data.append((key, str(value)))
+        data = new_data
+
+    data.append((action_field, "submit"))
+    return data
+
+
+def validate_readonly_post(url, data):
+    if not url.startswith(BASE_URL + EMPTY_STATE_PATH):
+        raise RuntimeError(f"HTTP送信先が許可範囲外です: {url}")
+
+    action_names = {name for name, _ in data} & ALLOWED_ACTION_FIELDS
+    if len(action_names) != 1:
+        raise RuntimeError(
+            f"HTTPアクション指定が不正です。検出={sorted(action_names)}"
+        )
+
+
+CHARSET_ALIASES = {
+    "utf8": "utf-8",
+    "utf-8": "utf-8",
+    "shift_jis": "cp932",
+    "shift-jis": "cp932",
+    "sjis": "cp932",
+    "ms932": "cp932",
+    "windows-31j": "cp932",
+    "windows_31j": "cp932",
+    "cp932": "cp932",
+    "euc-jp": "euc_jp",
+    "euc_jp": "euc_jp",
+    "iso-2022-jp": "iso2022_jp",
+    "iso2022-jp": "iso2022_jp",
+}
+
+
+def canonical_charset(name):
+    value = (name or "").strip().strip("\"'").lower()
+    if not value:
+        return None
+    return CHARSET_ALIASES.get(value, value)
+
+
+def charset_from_content_type(content_type):
+    m = re.search(
+        r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)",
+        content_type or "",
+        re.IGNORECASE,
+    )
+    return canonical_charset(m.group(1)) if m else None
+
+
+def charset_from_html_meta(raw_body):
+    """HTML本文先頭部のASCII互換部分からcharset指定を探す。"""
+    probe = raw_body[:65536].decode("latin-1", errors="ignore")
+    patterns = (
+        r"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)",
+        r"<meta[^>]+content\s*=\s*[\"'][^\"']*charset\s*=\s*([A-Za-z0-9._:-]+)",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, probe, re.IGNORECASE)
+        if m:
+            return canonical_charset(m.group(1))
+    return None
+
+
+def decode_http_html(response, fallback_charset=None):
+    """HTTPレスポンスHTMLを実際の文字コードに合わせて安全にデコードする。
+
+    PlaywrightのAPIResponse.text()は現在の実装ではresponse bodyをUTF-8として
+    文字列化するため、TOSSがShift_JIS/Windows-31Jを返す場合に備えて
+    raw body()を取得し、HTTPヘッダ→BOM→HTML meta→ブラウザ確認値→候補の順で
+    文字コードを決める。
+    """
+    raw = response.body()
+    if not raw:
+        raise RuntimeError("HTTP応答本文が空です。")
+
+    header_charset = charset_from_content_type(
+        response.headers.get("content-type", "")
+    )
+    meta_charset = charset_from_html_meta(raw)
+    browser_charset = canonical_charset(fallback_charset)
+
+    # BOMは他の推測より優先。
+    if raw.startswith(b"\xef\xbb\xbf"):
+        candidates = ["utf-8-sig"]
+    elif raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        candidates = ["utf-16"]
+    else:
+        candidates = []
+
+    # HTTPヘッダの指定を最優先。ヘッダが無い/不正な場合は、同じページを
+    # 実際にブラウザで描画したときのcharacterSetを優先し、meta→一般候補へ進む。
+    for enc in (header_charset, browser_charset, meta_charset, "utf-8", "cp932", "euc_jp"):
+        enc = canonical_charset(enc)
+        if enc and enc not in candidates:
+            candidates.append(enc)
+
+    errors = []
+    for enc in candidates:
+        try:
+            return (
+                raw.decode(enc, errors="strict"),
+                enc,
+                header_charset,
+                meta_charset,
+                len(raw),
+            )
+        except (UnicodeDecodeError, LookupError) as exc:
+            errors.append(f"{enc}:{type(exc).__name__}")
+
+    raise RuntimeError(
+        "HTTPレスポンスHTMLをデコードできませんでした。"
+        f" Content-Type={response.headers.get('content-type', '')!r};"
+        f" 候補={candidates}; 詳細={errors}"
+    )
+
+
+def http_post_readonly(request_context, page, current_html, current_url, user_agent, action_field, extra_fields, system_windows, fallback_charset=None):
+    """
+    現在のDOMから検索結果フォームを取得し、読み取り専用のページ移動POSTだけ送る。
+    現在HTMLをここで再度set_contentしないことで、無駄なDOM再構築を1回減らす。
+    """
+    data = build_readonly_post_data(page, action_field, extra_fields)
+    validate_readonly_post(URL, data)
+
+    action_name = action_field.rsplit(":", 1)[-1]
+    trace(
+        f"読み取り用HTTP POST: action={action_name}, fields={len(data)}"
+    )
+
+    ensure_not_maintenance()
+    time.sleep(REQUEST_GAP_SECONDS)
+    ensure_not_maintenance()
+    encoded = urlencode(data, doseq=True)
+
+    try:
+        response = request_context.post(
+            URL,
+            data=encoded,
+            headers={
+                "User-Agent": user_agent,
+                "Referer": current_url,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            timeout=HTTP_TIMEOUT_MS,
+            fail_on_status_code=False,
+            max_redirects=5,
+            max_retries=0,
+        )
+    except Exception as exc:
+        current_window = current_system_maintenance_window(system_windows)
+        if current_window:
+            start_dt, end_dt = current_window
+            raise ScheduledSystemMaintenanceError(
+                f"TOSSへの実アクセスが失敗し、告知済みのシステムメンテナンス時間帯 "
+                f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+                "メンテナンス中と判定して監視を停止します。",
+                end_dt,
+            ) from exc
+        raise RuntimeError(
+            f"HTTP通信に失敗しました: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    current_window = current_system_maintenance_window(system_windows)
+
+    if response.status != 200:
+        if current_window:
+            start_dt, end_dt = current_window
+            raise ScheduledSystemMaintenanceError(
+                f"TOSSへの実アクセスがHTTP {response.status}で失敗し、告知済みのシステムメンテナンス時間帯 "
+                f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+                "メンテナンス中と判定して監視を停止します。",
+                end_dt,
+            )
+        raise RuntimeError(
+            f"HTTP応答が200ではありません: {response.status} {response.url}"
+        )
+
+    if not response.url.startswith(BASE_URL + EMPTY_STATE_PATH):
+        if current_window:
+            start_dt, end_dt = current_window
+            raise ScheduledSystemMaintenanceError(
+                f"TOSSへの実アクセス先が想定外となり、告知済みのシステムメンテナンス時間帯 "
+                f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+                "メンテナンス中と判定して監視を停止します。",
+                end_dt,
+            )
+        raise RuntimeError(f"HTTP応答先が想定外です: {response.url}")
+
+    html, used_charset, header_charset, meta_charset, raw_size = decode_http_html(
+        response,
+        fallback_charset=fallback_charset,
+    )
+    global HTTP_ENCODING_TRACE_LOGGED
+    if not HTTP_ENCODING_TRACE_LOGGED:
+        trace(
+            "HTTP応答文字コード確認: "
+            f"使用={used_charset}, Content-Type指定={header_charset or 'なし'}, "
+            f"HTML meta指定={meta_charset or 'なし'}, "
+            f"ブラウザ確認値={canonical_charset(fallback_charset) or 'なし'}, "
+            f"生バイト={raw_size}"
+        )
+        HTTP_ENCODING_TRACE_LOGGED = True
+    if "rsvEmptyStateItemsSave" not in html:
+        if current_window:
+            start_dt, end_dt = current_window
+            raise ScheduledSystemMaintenanceError(
+                f"TOSSへの実アクセス結果に空き状況画面が返らず、告知済みのシステムメンテナンス時間帯 "
+                f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+                "メンテナンス中と判定して監視を停止します。",
+                end_dt,
+            )
+        raise RuntimeError("HTTP応答に空き状況検索フォームが見つかりません。")
+
+    # 応答HTMLをDOM化するのは次の読み取り処理に必要になったときだけ。
+    load_html_into_page(page, html)
+    return html, response.url
+
+
+def get_current_page_facilities(page):
+    """現在ページの5件程度をJS 1回でまとめて取得する。"""
+    return page.evaluate(
+        """
+        () => {
+            const results = [];
+            const facilityEls = [...document.querySelectorAll('span#bnamem')];
+            const itemEls = [...document.querySelectorAll('span#inamem')];
+            const iconEls = [...document.querySelectorAll('img#emptyStateIcon')];
+
+            if (facilityEls.length !== itemEls.length) {
+                throw new Error(`施設名(${facilityEls.length})と区画名(${itemEls.length})の件数が不一致です。`);
+            }
+            if (!facilityEls.length) {
+                throw new Error('このページから施設情報を取得できませんでした。');
+            }
+            if (iconEls.length < facilityEls.length * 3) {
+                throw new Error(`ステータスアイコン数が不足しています: ${iconEls.length}`);
+            }
+
+            for (let i = 0; i < facilityEls.length; i++) {
+                const facility = (facilityEls[i].textContent || '').trim();
+                const item = (itemEls[i].textContent || '').trim();
+                if (!facility || !item) {
+                    throw new Error(`結果${i + 1}の施設名または区画名が空です。`);
+                }
+
+                const statuses = [];
+                for (let j = 0; j < 3; j++) {
+                    const icon = iconEls[i * 3 + j];
+                    const td = icon.closest('td');
+                    const input = td ? td.querySelector("input[id='tzoneno']") : null;
+                    const tzoneno = input ? (input.value || '') : '';
+                    const status = icon.getAttribute('alt') || '';
+                    if (!tzoneno || !status) {
+                        throw new Error(`結果${i + 1}の時間帯または状態が空です。`);
+                    }
+                    statuses.push({tzoneno, status});
+                }
+
+                results.push({facility, item, statuses});
+            }
+            return results;
+        }
+        """
+    )
+
+
+def scan_one_date_http(request_context, page, html, current_url, user_agent, target_date, system_windows, fallback_charset=None):
+    load_html_into_page(page, html)
+    current_date = read_current_date(page)
+
+    if current_date != target_date:
+        html, current_url = http_post_readonly(
+            request_context,
+            page,
+            html,
+            current_url,
+            user_agent,
+            "layoutChildBody:childForm:doChangeDate",
+            {
+                "layoutChildBody:childForm:year": target_date.year,
+                "layoutChildBody:childForm:month": target_date.month,
+                "layoutChildBody:childForm:day": target_date.day,
+                "layoutChildBody:childForm:offset": 0,
+            },
+            system_windows,
+            fallback_charset=fallback_charset,
+        )
+
+        load_html_into_page(page, html)
+        current_date = read_current_date(page)
+        if current_date != target_date:
+            raise RuntimeError(
+                f"日付変更後の日付が不一致です: 期待={target_date}, 実際={current_date}"
+            )
+
+    all_count = read_all_count(page)
+    if all_count != 63:
+        raise RuntimeError(
+            f"検索結果件数が想定外です: allCount={all_count}（期待=63）"
+        )
+
+    all_facilities = []
+    offset = 0
+    page_no = 1
+
+    while offset < all_count:
+        if read_current_date(page) != target_date:
+            raise RuntimeError(
+                f"ページ読み込み前の日付が不正です: 期待={target_date}, 実際={read_current_date(page)}"
+            )
+
+        current_all_count = read_all_count(page)
+        if current_all_count != all_count:
+            raise RuntimeError(
+                f"ページ途中でallCountが変化しました: {all_count}->{current_all_count}"
+            )
+
+        facilities = get_current_page_facilities(page)
+        expected_count = min(5, all_count - offset)
+        if len(facilities) != expected_count:
+            raise RuntimeError(
+                f"{target_date} page={page_no}: 件数不一致 "
+                f"取得={len(facilities)}, 期待={expected_count}, offset={offset}"
+            )
+
+        all_facilities.extend(facilities)
+        trace(
+            f"{target_date.isoformat()} page={page_no}/13 "
+            f"offset={offset} 件数={len(facilities)}"
+        )
+
+        offset += len(facilities)
+        if offset >= all_count:
+            break
+
+        html, current_url = http_post_readonly(
+            request_context,
+            page,
+            html,
+            current_url,
+            user_agent,
+            "layoutChildBody:childForm:doPager",
+            {"layoutChildBody:childForm:offset": offset},
+            system_windows,
+            fallback_charset=fallback_charset,
+        )
+
+        next_date = read_current_date(page)
+        if next_date != target_date:
+            raise RuntimeError(
+                f"ページ移動後に日付が変化しました: 期待={target_date}, 実際={next_date}"
+            )
+        page_no += 1
+
+    if page_no != 13 or len(all_facilities) != 63:
+        raise RuntimeError(
+            f"{target_date.isoformat()}: 最終件数が不正です "
+            f"ページ={page_no}, 件数={len(all_facilities)}"
+        )
+
+    actual_statuses = sum(len(x["statuses"]) for x in all_facilities)
+    if actual_statuses != 189:
+        raise RuntimeError(
+            f"{target_date.isoformat()}: ステータス数が不正です "
+            f"{actual_statuses}（期待=189）"
+        )
+
+    for number, facility in enumerate(all_facilities, start=1):
+        facility["card_no"] = number
+
+    return all_facilities, html, current_url
+
+
+def make_status_snapshot(date_str, facilities):
+    statuses = {}
+    for facility in facilities:
+        card_no = facility["card_no"]
+        for st in facility["statuses"]:
+            key = f"{date_str}|{card_no}|{st['tzoneno']}"
+            statuses[key] = {
+                "status": st["status"],
+                "facility": facility["facility"],
+                "item": facility["item"],
+                "card_no": card_no,
+                "tzoneno": st["tzoneno"],
+                "time_name": TIME_MAP.get(st["tzoneno"], st["tzoneno"]),
+            }
+    return statuses
+
+
+def build_current_state(results_by_date):
+    current = {}
+    for date_str, facilities in results_by_date.items():
+        current.update(make_status_snapshot(date_str, facilities))
+    return current
+
+
+def detect_non_available_to_available(previous_payload, current_statuses):
+    if not previous_payload:
+        return []
+
+    previous = previous_payload.get("statuses", {})
+    if not isinstance(previous, dict):
+        return []
+
+    changed = []
+    for key, current in current_statuses.items():
+        if current.get("status") != "空き":
+            continue
+
+        old = previous.get(key)
+        if not isinstance(old, dict):
+            continue
+
+        old_status = old.get("status")
+        if old_status == "空き" or not old_status:
+            continue
+
+        date_str, card_no_str, tzoneno = key.split("|", 2)
+        changed.append({
+            "date": date_str,
+            "card_no": int(card_no_str),
+            "facility": current["facility"],
+            "item": current["item"],
+            "time_name": current["time_name"],
+            "tzoneno": tzoneno,
+            "from_status": old_status,
+            "to_status": "空き",
+        })
+
+    changed.sort(key=lambda x: (x["date"], x["card_no"], x["tzoneno"]))
+    return changed
+
+
+def format_results(results_by_date, changes, errors, notice_errors=None, maintenance_dates=None, range_start=None, range_end=None):
+    lines = [
+        "===== TOSS空き状況（HTTP監視テスト） =====",
+        "",
+    ]
+
+    for date_str in sorted(results_by_date):
+        lines.append(f"===== {date_str} =====")
+        for facility in results_by_date[date_str]:
+            lines.append(
+                f"{facility['facility']} / "
+                f"{facility['item']} {facility['card_no']}"
+            )
+            for st in facility["statuses"]:
+                lines.append(
+                    f"  {TIME_MAP.get(st['tzoneno'], st['tzoneno'])}: "
+                    f"{STATUS_MAP.get(st['status'], st['status'])}"
+                )
+            lines.append("")
+
+    lines.append("===== 今回検出した 空き化（○以外→○） =====")
+    if changes:
+        for change in changes:
+            lines.append(
+                f"★ {change['date']} / "
+                f"{change['facility']} / "
+                f"{change['item']} {change['card_no']} / "
+                f"{change['time_name']} / "
+                f"{STATUS_MAP.get(change['from_status'], change['from_status'])} → ○"
+            )
+    else:
+        lines.append("なし")
+
+
+    if notice_errors:
+        lines.extend(["", "===== お知らせ取得エラー ====="])
+        for message in notice_errors:
+            lines.append(f"・{message}")
+
+    if maintenance_dates:
+        shown = sorted(maintenance_dates)
+        if range_start and range_end:
+            shown = [d for d in shown if range_start <= d <= range_end]
+        if shown:
+            lines.extend(["", "===== お知らせによるメンテナンス予定 ====="])
+            for d in shown:
+                lines.append(f"{d.isoformat()}: TOSS定期メンテナンス（当日は終日利用不可）")
+
+    if errors:
+        lines.extend(["", "===== 取得エラー ====="])
+        for date_str in sorted(errors):
+            lines.append(f"{date_str}: {errors[date_str]}")
+
+    return "\n".join(lines)
+
+
+def build_target_dates():
+    """監視対象日は曜日だけで決める。
+
+    メンテナンス予定日は「予約状況を見ない日」ではなく、
+    「その日当日にTOSS本体が利用できない日」なので、未来日も監視対象に含める。
+    """
+    today = datetime.now(JST).date()
+    end_date = today + timedelta(days=DAYS_AHEAD)
+    targets = []
+
+    target = today
+    while target <= end_date:
+        if target.weekday() not in CLOSED_WEEKDAYS:
+            targets.append(target)
+        else:
+            trace(f"{target.isoformat()} は月曜日のためスキップします。")
+        target += timedelta(days=1)
+
+    return today, end_date, targets
+
+
+def scan_once(playwright):
+    global HTTP_ENCODING_TRACE_LOGGED
+    HTTP_ENCODING_TRACE_LOGGED = False
+
+    today, end_date, all_target_dates = build_target_dates()
+    trace(
+        f"===== HTTP監視開始: {today.isoformat()} ～ {end_date.isoformat()} ====="
+    )
+
+    previous_payload = load_state()
+    is_first_scan = previous_payload is None
+    scan_started_iso = now_iso()
+    save_runtime({
+        "monitor_status": "running",
+        "process_pid": os.getpid(),
+        "process_started_at": load_runtime().get("process_started_at") or now_iso(),
+        "last_scan_started_at": scan_started_iso,
+        "last_scan_finished_at": None,
+    })
+
+    browser = None
+    context = None
+
+    try:
+        (
+            browser,
+            context,
+            page,
+            html,
+            current_url,
+            user_agent,
+            browser_charset,
+            maintenance_dates,
+            system_windows,
+            notice_errors,
+        ) = bootstrap_browser_session(playwright)
+
+        # 同一BrowserContextのCookieを共有するHTTP API。
+        # ヘッダーは通常ブラウザのUser-Agentに合わせる。
+        request_context = context.request
+
+        # メンテナンス予定日は監視対象から除外しない。
+        # 未来日の予約状況は通常どおり確認し、メンテナンス当日になった時点で
+        # TOSS本体へのアクセスを止めて「メンテナンス中」と判定する。
+        target_dates = all_target_dates
+        future_maintenance_dates = sorted(
+            d for d in maintenance_dates
+            if today < d <= end_date
+        )
+        trace(
+            f"監視対象日数={len(target_dates)} / 月曜除外 / "
+            f"将来のTOSS定期メンテナンス予定={len(future_maintenance_dates)}"
+        )
+        if future_maintenance_dates:
+            trace(
+                "将来のTOSS定期メンテナンス日は予約状況を監視し、"
+                "当日だけTOSS利用不可として扱います: "
+                + ", ".join(d.isoformat() for d in future_maintenance_dates)
+            )
+
+        results_by_date = {}
+        errors_by_date = {}
+
+        for target_date in target_dates:
+            ensure_not_maintenance()
+            date_str = target_date.isoformat()
+            trace(f"日付取得開始: {date_str}")
+
+            try:
+                facilities, html, current_url = scan_one_date_http(
+                    request_context,
+                    page,
+                    html,
+                    current_url,
+                    user_agent,
+                    target_date,
+                    system_windows,
+                    browser_charset,
+                )
+                results_by_date[date_str] = facilities
+                trace(f"日付取得完了: {date_str}")
+            except Exception as exc:
+                errors_by_date[date_str] = f"{type(exc).__name__}: {exc}"
+                trace(
+                    f"日付取得エラー: {date_str} | "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                # 1日でも取得失敗したら、後続のHTTP送信は停止。
+                break
+
+        complete = (
+            not errors_by_date
+            and len(results_by_date) == len(target_dates)
+        )
+
+        if not complete:
+            result_text = format_results(
+                results_by_date,
+                [],
+                errors_by_date,
+                notice_errors=notice_errors,
+                maintenance_dates=maintenance_dates,
+                range_start=today,
+                range_end=end_date,
+            )
+            save_result(result_text)
+            details = []
+            for date_str in sorted(errors_by_date):
+                details.append(f"{date_str}: {errors_by_date[date_str]}")
+            error_blob = " / ".join(details)
+            page_words = ("件数", "allCount", "DOM", "フォーム", "施設", "icon", "日付", "ページ")
+            error_category = (
+                "TOSSページ構造エラー"
+                if any(word in error_blob for word in page_words)
+                else "TOSS取得エラー"
+            )
+            save_runtime({
+                "monitor_status": "error",
+                "last_scan_finished_at": now_iso(),
+                "last_success_at": load_runtime().get("last_success_at"),
+                "errors": {
+                    "TOSS取得エラー": error_blob if error_category == "TOSS取得エラー" else None,
+                    "お知らせ取得エラー": notice_errors or None,
+                    "TOSSページ構造エラー": error_blob if error_category == "TOSSページ構造エラー" else None,
+                    "状態ファイルエラー": None,
+                },
+            })
+            trace("取得が不完全なため、状態ファイルは更新しません。")
+            print(result_text)
+            print(f"\n保存先: {RESULT_FILE}")
+            print(f"状態保存先: {STATE_FILE}（今回は更新なし）")
+            return []
+
+        current_statuses = build_current_state(results_by_date)
+        changes = detect_non_available_to_available(previous_payload, current_statuses)
+
+        if is_first_scan and not INITIAL_SCAN_NOTIFY:
+            trace(
+                "初回監視のため、現在の○は通知対象にせず"
+                "状態だけ保存します。"
+            )
+            changes = []
+
+        result_text = format_results(
+            results_by_date,
+            changes,
+            {},
+            notice_errors=notice_errors,
+            maintenance_dates=maintenance_dates,
+            range_start=today,
+            range_end=end_date,
+        )
+        save_result(result_text)
+
+        # 未来のメンテナンス予定日も通常取得して状態保存する。
+        # メンテナンス当日にTOSSへ入れない間は、その日の状態を上書きしない。
+        keep_dates = {d.isoformat() for d in all_target_dates}
+        merged_statuses = {}
+        if isinstance(previous_payload, dict):
+            previous_statuses = previous_payload.get("statuses", {})
+            if isinstance(previous_statuses, dict):
+                for key, value in previous_statuses.items():
+                    date_part = str(key).split("|", 1)[0]
+                    if date_part in keep_dates:
+                        merged_statuses[key] = value
+
+        for date_str in results_by_date:
+            prefix = f"{date_str}|"
+            for key in [k for k in merged_statuses if k.startswith(prefix)]:
+                del merged_statuses[key]
+
+        merged_statuses.update(current_statuses)
+        save_state(
+            merged_statuses,
+            maintenance_dates=maintenance_dates,
+            system_windows=system_windows,
+        )
+
+        save_runtime({
+            "monitor_status": "ok",
+            "last_scan_finished_at": now_iso(),
+            "last_success_at": now_iso(),
+            "last_status_count": len(current_statuses),
+            "last_scan_has_notice_error": bool(notice_errors),
+            "errors": {
+                "TOSS取得エラー": None,
+                "お知らせ取得エラー": notice_errors or None,
+                "TOSSページ構造エラー": None,
+                "状態ファイルエラー": None,
+            },
+            "maintenance_dates": [d.isoformat() for d in sorted(maintenance_dates)],
+            "system_maintenance_windows": [
+                {"start": a.isoformat(), "end": b.isoformat()}
+                for a, b in system_windows
+            ],
+        })
+
+        trace(
+            f"HTTP監視完了: 日数={len(results_by_date)}, "
+            f"ステータス数={len(current_statuses)}, "
+            f"空き化（○以外→○）={len(changes)}"
+        )
+
+        print(result_text)
+        print(f"\n保存先: {RESULT_FILE}")
+        print(f"状態保存先: {STATE_FILE}")
+        return changes
+
+    finally:
+        if browser is not None:
+            browser.close()
+
+
+def main():
+    TRACE_FILE.write_text("", encoding="utf-8")
+    process_started_at = now_iso()
+    save_runtime({
+        "monitor_status": "starting",
+        "process_pid": os.getpid(),
+        "process_started_at": process_started_at,
+        "last_scan_started_at": None,
+        "last_scan_finished_at": None,
+    })
+
+    try:
+        with sync_playwright() as p:
+            while True:
+                # 03:00～04:00はTOSSへのアクセスを行わない。
+                if is_maintenance_time():
+                    save_maintenance_status()
+                    sleep_seconds = seconds_until_maintenance_end()
+                    trace(
+                        "TOSSメンテナンス中（03:00～04:00）のため監視を停止します。"
+                    )
+                    trace(
+                        f"04:00まで {sleep_seconds:.1f}秒待機します。"
+                    )
+                    time.sleep(sleep_seconds)
+                    trace("メンテナンス終了。次の監視を開始します。")
+                    continue
+
+                cycle_started = time.monotonic()
+
+                try:
+                    scan_once(p)
+                except ScheduledSystemMaintenanceError as exc:
+                    save_maintenance_status(str(exc))
+                    save_runtime({
+                        "monitor_status": "maintenance",
+                        "maintenance_reason": str(exc),
+                        "maintenance_until": exc.end_time.isoformat(),
+                        "errors": {
+                            "TOSS取得エラー": None,
+                            "お知らせ取得エラー": None,
+                            "TOSSページ構造エラー": None,
+                            "状態ファイルエラー": None,
+                        },
+                    })
+                    trace(str(exc))
+                    sleep_seconds = max(0.0, (exc.end_time - datetime.now(JST)).total_seconds())
+                    trace(
+                        f"システムメンテナンス終了まで {sleep_seconds:.1f}秒待機します。"
+                    )
+                    time.sleep(sleep_seconds)
+                    trace("システムメンテナンス終了。次の監視を開始します。")
+                    continue
+                except ScheduledMaintenanceError as exc:
+                    save_runtime({
+                        "monitor_status": "maintenance",
+                        "maintenance_reason": str(exc),
+                        "maintenance_until": (datetime.now(JST).date() + timedelta(days=1)).isoformat() + "T00:00:00+09:00",
+                        "errors": {
+                            "TOSS取得エラー": None,
+                            "お知らせ取得エラー": None,
+                            "TOSSページ構造エラー": None,
+                            "状態ファイルエラー": None,
+                        },
+                    })
+                    # お知らせで当日が終日メンテナンス対象と確認できた場合は、
+                    # 当日の無駄な再アクセスを避け、翌日まで停止する。
+                    save_maintenance_status(str(exc))
+                    trace(str(exc))
+                    sleep_seconds = seconds_until_next_day()
+                    trace(
+                        f"終日メンテナンス対象日のため、翌日00:00まで {sleep_seconds:.1f}秒待機します。"
+                    )
+                    time.sleep(sleep_seconds)
+                    trace("日付切替。次の監視を開始します。")
+                    continue
+                except MaintenanceWindowError as exc:
+                    save_runtime({
+                        "monitor_status": "maintenance",
+                        "maintenance_reason": str(exc),
+                        "maintenance_until": (datetime.now(JST).date().isoformat() + "T04:00:00+09:00"),
+                        "errors": {
+                            "TOSS取得エラー": None,
+                            "お知らせ取得エラー": None,
+                            "TOSSページ構造エラー": None,
+                            "状態ファイルエラー": None,
+                        },
+                    })
+                    # 監視途中で03:00を迎えた場合もエラー扱いにせず、
+                    # LINEから確認したときにメンテナンス表示になるようにする。
+                    save_maintenance_status()
+                    trace(str(exc))
+                    sleep_seconds = seconds_until_maintenance_end()
+                    trace(
+                        f"メンテナンス終了まで {sleep_seconds:.1f}秒待機します。"
+                    )
+                    time.sleep(sleep_seconds)
+                    trace("メンテナンス終了。次の監視を開始します。")
+                    continue
+                except StateFileError as exc:
+                    error_text = (
+                        "===== TOSS監視テスト エラー =====\n"
+                        f"状態ファイルエラー: {type(exc).__name__}: {exc}\n"
+                    )
+                    save_runtime({
+                        "monitor_status": "error",
+                        "errors": {
+                            "TOSS取得エラー": None,
+                            "お知らせ取得エラー": None,
+                            "TOSSページ構造エラー": None,
+                            "状態ファイルエラー": f"{type(exc).__name__}: {exc}",
+                        },
+                    })
+                    save_result(error_text)
+                    trace(error_text.replace("\n", " | "))
+                    print(error_text)
+                except Exception as exc:
+                    error_text = (
+                        "===== TOSS監視テスト エラー =====\n"
+                        f"{type(exc).__name__}: {exc}\n"
+                    )
+                    message = str(exc)
+                    page_words = ("件数", "allCount", "DOM", "フォーム", "施設", "icon", "日付", "ページ")
+                    category = "TOSSページ構造エラー" if any(word in message for word in page_words) else "TOSS取得エラー"
+                    save_runtime({
+                        "monitor_status": "error",
+                        "errors": {
+                            "TOSS取得エラー": message if category == "TOSS取得エラー" else None,
+                            "お知らせ取得エラー": None,
+                            "TOSSページ構造エラー": message if category == "TOSSページ構造エラー" else None,
+                            "状態ファイルエラー": None,
+                        },
+                    })
+                    save_result(error_text)
+                    trace(error_text.replace("\n", " | "))
+                    print(error_text)
+
+                elapsed = time.monotonic() - cycle_started
+                sleep_seconds = max(0, CHECK_INTERVAL_SECONDS - elapsed)
+
+                if sleep_seconds > 0:
+                    trace(
+                        f"今回の処理時間={elapsed:.1f}秒。"
+                        f"要求開始から5分後まで {sleep_seconds:.1f}秒待機します。"
+                    )
+                    time.sleep(sleep_seconds)
+                else:
+                    trace(
+                        f"今回の処理時間={elapsed:.1f}秒で5分を超えたため、"
+                        "待機せず次サイクルを開始します。"
+                    )
+
+    except KeyboardInterrupt:
+        trace("Ctrl+Cで終了しました。")
+
+
+if __name__ == "__main__":
+    main()
