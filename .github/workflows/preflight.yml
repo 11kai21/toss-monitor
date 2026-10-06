@@ -25,7 +25,6 @@ jobs:
           set -euo pipefail
           python -m py_compile \
             toss_monitor_github.py \
-            toss_monitor_once.py \
             toss_monitor_test_parallel_verified.py
 
       - name: Verify required Python dependency
