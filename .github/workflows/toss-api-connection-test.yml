@@ -1,0 +1,63 @@
+name: TOSS API Connection Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  api-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Test health endpoint
+        env:
+          TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          response="$(curl -fsS \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            "https://toss-monitor-api.nbakaikai.workers.dev/health")"
+
+          echo "$response"
+
+          echo "$response" | grep -q '"ok": true'
+          echo "$response" | grep -q '"kv_bound": true'
+          echo "$response" | grep -q '"token_configured": true'
+
+      - name: Test KV config read and write
+        env:
+          TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          before="$(curl -fsS \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
+
+          echo "Initial config:"
+          echo "$before"
+
+          put_response="$(curl -fsS \
+            -X PUT \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"monitor_enabled":false}' \
+            "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
+
+          echo "Write response:"
+          echo "$put_response"
+
+          echo "$put_response" | grep -q '"ok": true'
+          echo "$put_response" | grep -q '"monitor_enabled": false'
+
+          after="$(curl -fsS \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            "https://toss-monitor-api.nbakaikai.workers.dev/api/config")"
+
+          echo "Read-after-write:"
+          echo "$after"
+
+          echo "$after" | grep -q '"monitor_enabled": false'
