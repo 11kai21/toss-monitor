@@ -55,7 +55,8 @@ jobs:
 
           assert values["DAYS_AHEAD"] == 13, values.get("DAYS_AHEAD")
           assert values["CLOSED_WEEKDAYS"] == {0}, values.get("CLOSED_WEEKDAYS")
-          assert values["CHECK_INTERVAL_SECONDS"] == 5 * 60, values.get("CHECK_INTERVAL_SECONDS")
+          source_text = path.read_text(encoding="utf-8")
+          assert "CHECK_INTERVAL_SECONDS = 5 * 60" in source_text, "CHECK_INTERVAL_SECONDS must remain 5 * 60"
           assert values["HEADLESS"] is True, values.get("HEADLESS")
           assert values["INITIAL_SCAN_NOTIFY"] is False, values.get("INITIAL_SCAN_NOTIFY")
           assert values["PURPOSES"] == ["バスケットボール", "バスケ（ハーフコート）"], values.get("PURPOSES")
