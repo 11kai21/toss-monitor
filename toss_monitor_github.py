@@ -143,14 +143,10 @@ def main():
         "last_scan_finished_at": None,
     })
 
-    config = api_request("GET", "/api/config")
-    monitor_enabled = bool(config.get("monitor_enabled", False))
-
-    print(f"Cloudflare監視設定: monitor_enabled={monitor_enabled}")
-
-    if not monitor_enabled:
-        print("監視OFFのため、今回はTOSSへアクセスしません。")
-        return
+    # TOSS状態の定期取得は、LINEの監視モードON/OFFとは独立して常時実行する。
+    # monitor_enabled はLINE側の「○以外→○」通知を有効にするための設定であり、
+    # 最新のTOSS状態をCloudflare KVへ更新する処理を停止させてはいけない。
+    print("TOSS最新状態の定期取得を開始します（監視モードON/OFFとは独立）。")
 
     previous_state = load_remote_state()
 
