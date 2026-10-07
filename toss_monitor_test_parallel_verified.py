@@ -1124,6 +1124,65 @@ def set_purposes(page):
         )
 
 
+def wait_for_complete_search_results(page, timeout_ms=15000):
+    """検索結果1ページ分のDOM描画完了を確認する。
+
+    最初のemptyStateIconだけが先に描画される場合があるため、
+    5カード・各3時間帯（計15枠）が揃うまで待ってからHTMLを取得する。
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    last = None
+
+    while True:
+        last = page.evaluate(
+            """
+            () => {
+                const cards = [...document.querySelectorAll('table.tablebg2')]
+                    .filter(table =>
+                        table.querySelector('span#bnamem') &&
+                        table.querySelector('span#inamem')
+                    );
+
+                return {
+                    all_count: document.querySelector(
+                        "input[name='layoutChildBody:childForm:allCount']"
+                    )?.value || '',
+                    card_count: cards.length,
+                    icon_count: document.querySelectorAll('img#emptyStateIcon').length,
+                    tzoneno_count: document.querySelectorAll('input[id="tzoneno"]').length,
+                    card_slot_counts: cards.map(table => ({
+                        icons: table.querySelectorAll('img#emptyStateIcon').length,
+                        tzoneno: table.querySelectorAll('input[id="tzoneno"]').length
+                    }))
+                };
+            }
+            """
+        )
+
+        if (
+            last["all_count"] == "63"
+            and last["card_count"] == 5
+            and last["icon_count"] == 15
+            and last["tzoneno_count"] == 15
+            and all(
+                x["icons"] == 3 and x["tzoneno"] == 3
+                for x in last["card_slot_counts"]
+            )
+        ):
+            return
+
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "検索結果の描画完了を確認できませんでした: "
+                f"allCount={last['all_count']}, "
+                f"cards={last['card_count']}, "
+                f"icons={last['icon_count']}, "
+                f"tzoneno={last['tzoneno_count']}"
+            )
+
+        page.wait_for_timeout(250)
+
+
 def click_search(page):
     elements = page.locator("input, button, a")
     candidates = []
@@ -1149,15 +1208,13 @@ def click_search(page):
     for el in reversed(candidates):
         try:
             el.click(force=True)
-            page.locator("img#emptyStateIcon").first.wait_for(
-                state="attached",
-                timeout=15000,
-            )
+            wait_for_complete_search_results(page)
             return
         except Exception:
             continue
 
-    raise RuntimeError("検索結果画面への移動を確認できませんでした。")
+    raise RuntimeError("検索結果画面への移動または描画完了を確認できませんでした。")
+
 
 
 def raise_maintenance_if_current_window(system_windows, exc):
@@ -1173,7 +1230,6 @@ def raise_maintenance_if_current_window(system_windows, exc):
         "メンテナンス中と判定して監視を停止します。"
     )
     return ScheduledSystemMaintenanceError(reason, end_dt)
-
 
 def bootstrap_browser_session(playwright):
     """
@@ -1616,52 +1672,75 @@ def http_post_readonly(request_context, page, current_html, current_url, user_ag
 
 
 def get_current_page_facilities(page):
-    """現在ページの5件程度をJS 1回でまとめて取得する。"""
+    """現在ページのカード単位で5件程度を取得する。"""
     return page.evaluate(
         """
         () => {
             const results = [];
-            const facilityEls = [...document.querySelectorAll('span#bnamem')];
-            const itemEls = [...document.querySelectorAll('span#inamem')];
-            const iconEls = [...document.querySelectorAll('img#emptyStateIcon')];
+            const cardTables = [...document.querySelectorAll('table.tablebg2')]
+                .filter(table =>
+                    table.querySelector('span#bnamem') &&
+                    table.querySelector('span#inamem')
+                );
 
-            if (facilityEls.length !== itemEls.length) {
-                throw new Error(`施設名(${facilityEls.length})と区画名(${itemEls.length})の件数が不一致です。`);
-            }
-            if (!facilityEls.length) {
-                throw new Error('このページから施設情報を取得できませんでした。');
-            }
-            if (iconEls.length < facilityEls.length * 3) {
-                throw new Error(`ステータスアイコン数が不足しています: ${iconEls.length}`);
+            if (!cardTables.length) {
+                throw new Error('検索結果から施設カードを取得できませんでした。');
             }
 
-            for (let i = 0; i < facilityEls.length; i++) {
-                const facility = (facilityEls[i].textContent || '').trim();
-                const item = (itemEls[i].textContent || '').trim();
+            for (let i = 0; i < cardTables.length; i++) {
+                const table = cardTables[i];
+                const facilityEl = table.querySelector('span#bnamem');
+                const itemEl = table.querySelector('span#inamem');
+                const facilityEls = table.querySelectorAll('span#bnamem');
+                const itemEls = table.querySelectorAll('span#inamem');
+                const iconEls = [...table.querySelectorAll('img#emptyStateIcon')];
+                const tzEls = [...table.querySelectorAll('input[id="tzoneno"]')];
+
+                if (facilityEls.length !== 1 || itemEls.length !== 1) {
+                    throw new Error(
+                        '結果' + (i + 1) + 'の施設名/区画名構造が不正です: ' +
+                        facilityEls.length + '/' + itemEls.length
+                    );
+                }
+
+                const facility = (facilityEl.textContent || '').trim();
+                const item = (itemEl.textContent || '').trim();
                 if (!facility || !item) {
-                    throw new Error(`結果${i + 1}の施設名または区画名が空です。`);
+                    throw new Error('結果' + (i + 1) + 'の施設名または区画名が空です。');
+                }
+
+                if (iconEls.length !== 3 || tzEls.length !== 3) {
+                    throw new Error(
+                        '結果' + (i + 1) + 'の時間帯要素数が不正です: ' +
+                        'tzoneno=' + tzEls.length + ', icon=' + iconEls.length
+                    );
                 }
 
                 const statuses = [];
+
                 for (let j = 0; j < 3; j++) {
-                    const icon = iconEls[i * 3 + j];
-                    const td = icon.closest('td');
-                    const input = td ? td.querySelector("input[id='tzoneno']") : null;
-                    const tzoneno = input ? (input.value || '') : '';
-                    const status = icon.getAttribute('alt') || '';
+                    const input = tzEls[j];
+                    const tzoneno = input.value || '';
+                    const td = input.closest('td');
+                    const icon = td ? td.querySelector('img#emptyStateIcon') : null;
+                    const status = icon ? (icon.getAttribute('alt') || '') : '';
+
                     if (!tzoneno || !status) {
-                        throw new Error(`結果${i + 1}の時間帯または状態が空です。`);
+                        throw new Error(
+                            '結果' + (i + 1) + 'の時間帯または状態が空です。'
+                        );
                     }
+
                     statuses.push({tzoneno, status});
                 }
 
                 results.push({facility, item, statuses});
             }
+
             return results;
         }
         """
     )
-
 
 def scan_one_date_http(request_context, page, html, current_url, user_agent, target_date, system_windows, fallback_charset=None):
     load_html_into_page(page, html)
