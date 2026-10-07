@@ -87,7 +87,7 @@ jobs:
           ]
           for item in required:
               assert item in text, item
-          assert 'if not monitor_enabled:' not in text, \\
+          assert 'if not monitor_enabled:' not in text, \
               "monitor_enabled must not disable the periodic TOSS state refresh"
           print("GitHub-to-KV bridge: OK")
           PY
