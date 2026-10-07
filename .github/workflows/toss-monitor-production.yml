@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    - cron: "17/5 * * * *"
 
 permissions:
   contents: read
@@ -21,14 +19,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Ensure scheduled workflow is enabled
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/enable"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml" --jq '"workflow_state=" + .state'
-          echo "Workflow enable/resync request: OK"
+      - name: Mark cycle start
+        run: echo "CYCLE_START=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -61,3 +53,22 @@ jobs:
             toss_trace.txt
             toss_runtime.json
           if-no-files-found: ignore
+
+      - name: Start next 5-minute cycle
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          start="${CYCLE_START:-$(date +%s)}"
+          now="$(date +%s)"
+          elapsed=$((now - start))
+          remaining=$((300 - elapsed))
+          if (( remaining > 0 )); then
+            echo "次回runまで ${remaining} 秒待機"
+            sleep "$remaining"
+          else
+            echo "取得処理が5分を超えたため待機なし"
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/dispatches" -f ref=main
+          echo "次回TOSS Monitor runを起動しました"
