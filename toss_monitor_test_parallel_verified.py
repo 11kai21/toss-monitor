@@ -1216,6 +1216,21 @@ def click_search(page):
     raise RuntimeError("検索結果画面への移動または描画完了を確認できませんでした。")
 
 
+
+def raise_maintenance_if_current_window(system_windows, exc):
+    """現在が告知済みメンテナンス時間帯で、実際のアクセスに失敗した場合だけメンテナンス扱いにする。"""
+    current_window = current_system_maintenance_window(system_windows)
+    if not current_window:
+        raise exc
+
+    start_dt, end_dt = current_window
+    reason = (
+        f"TOSS本体への実アクセスが失敗し、告知済みのシステムメンテナンス時間帯 "
+        f"（{start_dt:%Y-%m-%d %H:%M}～{end_dt:%Y-%m-%d %H:%M}）とも一致したため、"
+        "メンテナンス中と判定して監視を停止します。"
+    )
+    return ScheduledSystemMaintenanceError(reason, end_dt)
+
 def bootstrap_browser_session(playwright):
     """
     ブラウザでは通常の検索条件確立だけを行う。
