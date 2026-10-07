@@ -2,8 +2,6 @@ name: TOSS Monitor Production
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
