@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: toss-monitor
@@ -20,6 +21,15 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Ensure scheduled workflow is enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/enable"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml" --jq '"workflow_state=" + .state'
+          echo "Workflow enable/resync request: OK"
+
       - name: Checkout
         uses: actions/checkout@v7
 
