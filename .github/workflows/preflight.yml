@@ -98,7 +98,7 @@ jobs:
           node --check cloudflare/toss-line-bot.js
           grep -Fq 'https://www.cm1.eprs.jp/TOSS/web/view/user/c005RsvEmptyState.html' cloudflare/toss-line-bot.js
           grep -Fq 'const DAY_MAX = 13;' cloudflare/toss-line-bot.js
-          grep -Fq '【＝＝＝＝ 現在エラーはありません ＝＝＝＝】' cloudflare/toss-line-bot.js
+          grep -Fq '【＝ 現在エラーはありません ＝】' cloudflare/toss-line-bot.js
           grep -Fq 'const HOURS = [9,13,17];' cloudflare/toss-line-bot.js
           ! grep -Fqi 'wedding-ticket' cloudflare/toss-line-bot.js
           ! grep -Fqi 'wedding' cloudflare/toss-line-bot.js
