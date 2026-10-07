@@ -1,17 +1,28 @@
 name: TOSS Preflight Validation
 
 on:
-  # 本番化時に push / pull_request を復活させる。
+  # 復旧用に main への push でも1回実行する。復旧確認後にこのトリガーは削除する。
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
 
     steps:
+      - name: Re-enable TOSS Monitor workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor.yml/enable"
+          echo "TOSS Monitor workflow enable request: OK"
+
       - name: Checkout
         uses: actions/checkout@v7
 
