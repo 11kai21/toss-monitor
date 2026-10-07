@@ -82,6 +82,7 @@ async function webhook(data){
 }
 async function scheduledTask(){
   const c=await config();if(!c.monitor_enabled)return;let ls=await lineState(),r=await runtime();
+  const scheduledStateBefore=JSON.stringify(ls);
   if(!ls.monitoring?.enabled)return;
   const en=Date.parse(ls.monitoring.enabled_at||""),ru=Date.parse(r.updated_at||"");
   const er=r.errors&&typeof r.errors==="object"?r.errors:{};const payload={};for(const k of ERRORS)if(k!=="LINE送信エラー"&&er[k])payload[k]=er[k];const es=JSON.stringify(payload);
@@ -97,7 +98,7 @@ async function scheduledTask(){
     }
   }catch(err){await lineError("監視状態比較失敗: "+err);}
   if(r.monitor_status!=="maintenance"){const last=r.last_scan_started_at||r.updated_at,ts=Date.parse(last||"");if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){const age=Date.now()-ts;if(age>STALE_MS&&!ls.monitor_stale_notified){try{await push(["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],false)}catch(err){await lineError("監視停止疑い通知失敗: "+err)}ls.monitor_stale_notified=true}else if(age<=STALE_MS&&ls.monitor_stale_notified){try{await push(["TOSS監視の動作を確認しました。監視を再開しています。"],false)}catch(err){await lineError("監視復帰通知失敗: "+err)}ls.monitor_stale_notified=false;}}}
-  await saveLine(ls);
+  if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
 }
 addEventListener("fetch",event=>event.respondWith((async()=>{const u=new URL(event.request.url);if(event.request.method==="GET"&&u.pathname==="/")return json({ok:true,service:"toss-line-bot"});if(event.request.method==="GET"&&u.pathname==="/health")return json({ok:true,service:"toss-line-bot",kv_bound:typeof TOSS_KV!=="undefined",line_secret_configured:typeof LINE_CHANNEL_SECRET!=="undefined"&&!!LINE_CHANNEL_SECRET,line_access_token_configured:typeof LINE_CHANNEL_ACCESS_TOKEN!=="undefined"&&!!LINE_CHANNEL_ACCESS_TOKEN,allowed_user_configured:typeof LINE_ALLOWED_USER_ID!=="undefined"&&!!LINE_ALLOWED_USER_ID});if(event.request.method!=="POST"||u.pathname!=="/callback")return new Response("Not Found",{status:404});const len=Number(event.request.headers.get("content-length")||0);if(len<=0||len>MAX_BODY)return new Response("Payload Too Large",{status:413});const body=await event.request.text();if(new TextEncoder().encode(body).length>MAX_BODY||!(await verify(body,event.request.headers.get("x-line-signature")||"")))return new Response("Bad Request",{status:400});let data;try{data=JSON.parse(body)}catch{return new Response("Bad Request",{status:400})}if(!Array.isArray(data.events))return new Response("Bad Request",{status:400});if(!data.events.length)return new Response("OK");event.waitUntil(webhook(data));return new Response("OK")})()));
 addEventListener("scheduled",event=>event.waitUntil(scheduledTask()));
