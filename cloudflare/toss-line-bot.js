@@ -10,7 +10,9 @@ const HOURS = [9,13,17];
 const WD = ["月","火","水","木","金","土","日"];
 const ERRORS = ["TOSS取得エラー","お知らせ取得エラー","TOSSページ構造エラー","状態ファイルエラー","LINE送信エラー"];
 const MAX_BODY = 262144;
-const STALE_MS = 600000;
+const STALE_MS = 900000;
+const NIGHT_PAUSE_START_HOUR = 1;
+const NIGHT_PAUSE_END_HOUR = 7;
 
 function json(data,status){return new Response(JSON.stringify(data),{status:status||200,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});}
 function nowIso(){return new Date().toISOString();}
@@ -26,7 +28,7 @@ function label(v){const a=v.split("-");return "▦ "+a[0]+"/"+a[1]+"/"+a[2]+"（
 function fresh(v){if(!v)return"取得時刻不明";const d=new Date(v.indexOf("T")>=0?v:v.replace(" ","T")+"+09:00");if(Number.isNaN(d.getTime()))return"取得時刻不明";const m=Math.max(0,Math.floor((Date.now()-d.getTime())/60000));if(m<1)return"1分未満前";if(m<60)return m+"分前";const h=Math.floor(m/60),r=m%60;return h+"時間"+(r?r+"分":"")+"前";}
 async function read(key,fallback){const v=await TOSS_KV.get(key);if(v===null)return fallback;return JSON.parse(v);}
 async function tossState(){let s=null,b=false;try{s=await read(STATE_KEY,null)}catch{}if(!s?.statuses){try{s=await read(STATE_BAK_KEY,null);b=true}catch{}}if(!s?.statuses)throw Error("TOSS状態を読み取れません。");return{state:s,backup:b};}
-function baseLine(){return{version:1,updated_at:nowIso(),monitoring:{enabled:false,start_date:null,end_date:null,enabled_at:null},operation:{feature:null,step:null,start_date:null,expires_at:null},facility_icons:{},processed_event_ids:[],last_line_error:null,last_line_send_at:null,last_seen_state_saved_at:null,last_toss_alert_signature:null,last_toss_runtime_signature:null,monitor_stale_notified:false};}
+function baseLine(){return{version:1,updated_at:nowIso(),monitoring:{enabled:false,start_date:null,end_date:null,enabled_at:null},operation:{feature:null,step:null,start_date:null,expires_at:null},facility_icons:{},processed_event_ids:[],last_line_error:null,last_line_send_at:null,last_seen_state_saved_at:null,last_toss_alert_signature:null,last_toss_runtime_signature:null,monitor_stale_notified:false,night_baseline_date:null};}
 async function lineState(){let s=null;try{s=await read(LINE_STATE_KEY,null)}catch{}if(!s){try{s=await read(LINE_STATE_BAK_KEY,null)}catch{}}const b=baseLine();if(!s||typeof s!=="object")return b;return{...b,...s,monitoring:{...b.monitoring,...(s.monitoring||{})},operation:{...b.operation,...(s.operation||{})},facility_icons:s.facility_icons&&typeof s.facility_icons==="object"?s.facility_icons:{},processed_event_ids:Array.isArray(s.processed_event_ids)?s.processed_event_ids.slice(-200):[]};}
 async function saveLine(s){const old=await TOSS_KV.get(LINE_STATE_KEY);if(old!==null)await TOSS_KV.put(LINE_STATE_BAK_KEY,old);const n={...s,updated_at:nowIso()};await TOSS_KV.put(LINE_STATE_KEY,JSON.stringify(n));return n;}
 async function runtime(){try{const s=await read(RUNTIME_KEY,{});return s&&typeof s==="object"?s:{}}catch{return{}}}
@@ -35,12 +37,13 @@ async function setConfig(on){await TOSS_KV.put(CONFIG_KEY,JSON.stringify({monito
 function hour(v){const m=String(v||"").match(/(?:^|\D)(\d{1,2})(?=\s*(?:時|:|：))/);return m?Number(m[1]):null;}
 async function dayMsg(s,d){
   if(weekday(d)===0)return label(d)+"\n\n月曜日のためTOSS監視対象外です。\n\n🔗 TOSSを開く：\n"+TOSS_URL;
-  const ls=await lineState(),by={9:[],13:[],17:[]};
+  const ls=await lineState(),beforeIcons=JSON.stringify(ls.facility_icons||{}),by={9:[],13:[],17:[]};
   for(const[k,v]of Object.entries(s.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|");if(p.length<3||p[0]!==d)continue;const h=hour(v.time_name||p[2]);if(by[h])by[h].push({v:v,card:v.card_no==null?p[1]:v.card_no,time:v.time_name||p[2]});}
   for(const h of HOURS)by[h].sort((a,b)=>(Number(a.card)||9999)-(Number(b.card)||9999));
-  const lines=[label(d),"最終取得："+fresh(s.saved_at),""];
+  const r=await runtime(),displaySavedAt=r.last_success_at||s.saved_at;
+  const lines=[label(d),"最終取得："+fresh(displaySavedAt),""];
   for(let i=0;i<HOURS.length;i++){const h=HOURS[i];if(i)lines.push("");lines.push("【"+h+"時】");if(!by[h].length){lines.push("空きなし");continue;}for(const x of by[h]){const f=x.v.facility||"不明";if(!ls.facility_icons[f]){const pal=["🔵","🟢","🟠","🟣","🟡","🔴","🟦","🟩","🟧","🟪","🟨","🟥"],used=new Set(Object.values(ls.facility_icons));ls.facility_icons[f]=pal.find(z=>!used.has(z))||pal[Object.keys(ls.facility_icons).length%pal.length];}lines.push(ls.facility_icons[f]+" "+f);lines.push(x.v.item||"不明");lines.push("");}}
-  await saveLine(ls);
+  if(JSON.stringify(ls.facility_icons||{})!==beforeIcons)await saveLine(ls);
   lines.push("🔗 予約サイトはこちら：",TOSS_URL);
   return lines.join("\n").replace(/\n{3,}/g,"\n\n");
 }
@@ -76,9 +79,9 @@ async function verify(body,sig){
   const b=new Uint8Array(await crypto.subtle.sign("HMAC",k,new TextEncoder().encode(body)));let bin="";for(const x of b)bin+=String.fromCharCode(x);return btoa(bin)===sig;
 }
 async function webhook(data){
-  const s=await lineState(),seen=new Set(s.processed_event_ids||[]);
+  const s=await lineState(),before=JSON.stringify(s.processed_event_ids||[]),seen=new Set(s.processed_event_ids||[]);
   for(const e of data.events||[]){const id=e.webhookEventId;if(id&&seen.has(id))continue;const uid=e.source?.userId;if(typeof LINE_ALLOWED_USER_ID==="undefined"||!LINE_ALLOWED_USER_ID||uid!==LINE_ALLOWED_USER_ID){if(id)seen.add(id);continue;}try{if(e.type==="postback")await postback(e)}catch(err){await lineError("Webhook処理失敗: "+err)}if(id)seen.add(id);}
-  const n=await lineState();n.processed_event_ids=Array.from(seen).slice(-200);await saveLine(n);
+  if(JSON.stringify(Array.from(seen).slice(-200))!==before){const n=await lineState();n.processed_event_ids=Array.from(seen).slice(-200);await saveLine(n);}
 }
 function refreshMonitoringWindow(s,currentDay){
   const m=s.monitoring;
@@ -92,6 +95,8 @@ function refreshMonitoringWindow(s,currentDay){
 }
 async function scheduledTask(){
   if(["2026-10-16","2026-10-17"].includes(today()))return;
+  const now=new Date(),jstParts=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",hour:"2-digit",hourCycle:"h23"}).formatToParts(now),jstHour=Number(jstParts.find(x=>x.type==="hour")?.value??"99");
+  if(jstHour>=NIGHT_PAUSE_START_HOUR&&jstHour<NIGHT_PAUSE_END_HOUR)return;
   const c=await config();if(!c.monitor_enabled)return;let ls=await lineState(),r=await runtime();
   const scheduledStateBefore=JSON.stringify(ls);
   if(!ls.monitoring?.enabled)return;
@@ -111,15 +116,33 @@ async function scheduledTask(){
   const en=Date.parse(ls.monitoring.enabled_at||""),ru=Date.parse(r.updated_at||"");
   const er=r.errors&&typeof r.errors==="object"?r.errors:{};const payload={};for(const k of ERRORS)if(k!=="LINE送信エラー"&&er[k])payload[k]=er[k];const es=JSON.stringify(payload);
   if(Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){if(es&&es!==ls.last_toss_runtime_signature){if(ls.last_toss_runtime_signature!==null)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}ls.last_toss_runtime_signature=es}else if(!es&&ls.last_toss_runtime_signature){try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}ls.last_toss_runtime_signature=null;}}
-  try{const cur=(await tossState()).state,saved=String(cur.saved_at||""),st=dateOk(ls.monitoring.start_date)?ls.monitoring.start_date:null,ed=dateOk(ls.monitoring.end_date)?ls.monitoring.end_date:null;
-    if(saved&&st&&ed){if(!ls.last_seen_state_saved_at){ls.last_seen_state_saved_at=saved;}
-    else if(saved!==ls.last_seen_state_saved_at&&(!ls.monitoring.enabled_at||Date.parse(saved)>=Date.parse(ls.monitoring.enabled_at))){let prev={statuses:{}};try{prev=await read(STATE_BAK_KEY,{statuses:{}})}catch{}const changes=[];
-      for(const[k,v]of Object.entries(cur.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|"),dd=p[0],d2=dateOk(dd)?dd:null;if(!d2||d2<st||d2>ed)continue;const old=prev.statuses?.[k];if(!old||old.status==="空き")continue;changes.push({date:dd,facility:v.facility||"不明",item:v.item||"不明",time_name:v.time_name||p[2],card_no:v.card_no==null?p[1]:v.card_no,from:old.status});}
-      changes.sort((a,b)=>[a.date,hour(a.time_name)??99,Number(a.card_no)||9999,a.time_name].join("|").localeCompare([b.date,hour(b.time_name)??99,Number(b.card_no)||9999,b.time_name].join("|")));
-      if(changes.length){const sig=btoa(unescape(encodeURIComponent(JSON.stringify(changes))));if(sig!==ls.last_toss_alert_signature){try{await push(["===== 空きが出ました =====","最終取得："+fresh(cur.saved_at),"",...changes.map(x=>"■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL)],false);ls.last_toss_alert_signature=sig}catch(err){await lineError("空き化通知失敗: "+err)}}}
-      else ls.last_toss_alert_signature=null;ls.last_seen_state_saved_at=saved;}
+
+  let currentState=null,nightBaselineJustSet=false;
+  try{currentState=(await tossState()).state;}catch(err){await lineError("監視状態比較失敗: "+err);}
+  if(currentState){
+    const saved=String(currentState.saved_at||"");
+    const st=dateOk(ls.monitoring.start_date)?ls.monitoring.start_date:null,ed=dateOk(ls.monitoring.end_date)?ls.monitoring.end_date:null;
+    const savedEpoch=Date.parse(saved),todayStart=Date.parse(currentDay+"T07:00:00+09:00");
+    if(ls.night_baseline_date!==currentDay&&Number.isFinite(savedEpoch)&&savedEpoch>=todayStart){
+      ls.night_baseline_date=currentDay;
+      ls.last_seen_state_saved_at=saved;
+      ls.last_toss_alert_signature=null;
+      nightBaselineJustSet=true;
     }
-  }catch(err){await lineError("監視状態比較失敗: "+err);}
+    if(saved&&st&&ed&&!nightBaselineJustSet){
+      if(!ls.last_seen_state_saved_at){ls.last_seen_state_saved_at=saved;}
+      else if(saved!==ls.last_seen_state_saved_at&&(!ls.monitoring.enabled_at||Date.parse(saved)>=Date.parse(ls.monitoring.enabled_at))){
+        let prev={statuses:{}};try{prev=await read(STATE_BAK_KEY,{statuses:{}})}catch{}
+        const changes=[];
+        for(const[k,v]of Object.entries(currentState.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|"),dd=p[0],d2=dateOk(dd)?dd:null;if(!d2||d2<st||d2>ed)continue;const old=prev.statuses?.[k];if(!old||old.status==="空き")continue;changes.push({date:dd,facility:v.facility||"不明",item:v.item||"不明",time_name:v.time_name||p[2],card_no:v.card_no==null?p[1]:v.card_no,from:old.status});}
+        changes.sort((a,b)=>[a.date,hour(a.time_name)??99,Number(a.card_no)||9999,a.time_name].join("|").localeCompare([b.date,hour(b.time_name)??99,Number(b.card_no)||9999,b.time_name].join("|")));
+        if(changes.length){const sig=btoa(unescape(encodeURIComponent(JSON.stringify(changes))));if(sig!==ls.last_toss_alert_signature){try{await push(["===== 空きが出ました =====","最終取得："+fresh(currentState.saved_at),"",...changes.map(x=>"■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL)],false);ls.last_toss_alert_signature=sig}catch(err){await lineError("空き化通知失敗: "+err)}}}
+        else ls.last_toss_alert_signature=null;
+        ls.last_seen_state_saved_at=saved;
+      }
+    }
+  }
+
   if(r.monitor_status!=="maintenance"){const last=r.last_scan_started_at||r.updated_at,ts=Date.parse(last||"");if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){const age=Date.now()-ts;if(age>STALE_MS&&!ls.monitor_stale_notified){try{await push(["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],false)}catch(err){await lineError("監視停止疑い通知失敗: "+err)}ls.monitor_stale_notified=true}else if(age<=STALE_MS&&ls.monitor_stale_notified){try{await push(["TOSS監視の動作を確認しました。監視を再開しています。"],false)}catch(err){await lineError("監視復帰通知失敗: "+err)}ls.monitor_stale_notified=false;}}}
   if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
 }
