@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 API_BASE = "https://toss-monitor-api.nbakaikai.workers.dev"
 API_TOKEN_ENV = "TOSS_API_TOKEN"
+RUNTIME_PUBLISH_INTERVAL_SECONDS = 10 * 60
 
 
 def api_request(method, path, body=None):
@@ -58,6 +59,53 @@ def api_request(method, path, body=None):
 
 
 def load_remote_state():
+def load_remote_runtime():
+    response = api_request("GET", "/api/runtime")
+    if response.get("exists") is False:
+        return {}
+    runtime = response.get("runtime")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("Cloudflare KV runtime is missing or invalid")
+    return runtime
+
+
+def _parse_iso_epoch(value):
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def should_publish_runtime(runtime, remote_runtime):
+    if not isinstance(runtime, dict):
+        return True
+    if runtime.get("monitor_status") != "ok":
+        return True
+    if not isinstance(remote_runtime, dict):
+        return True
+    if remote_runtime.get("monitor_status") != "ok":
+        return True
+    last_published = _parse_iso_epoch(
+        remote_runtime.get("last_success_at") or remote_runtime.get("updated_at")
+    )
+    if last_published is None:
+        return True
+    import time as _time
+    return (_time.time() - last_published) >= RUNTIME_PUBLISH_INTERVAL_SECONDS
+
+
+def state_contents_equal(a, b):
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    return (
+        a.get("statuses") == b.get("statuses")
+        and a.get("maintenance_dates") == b.get("maintenance_dates")
+        and a.get("system_maintenance_windows") == b.get("system_maintenance_windows")
+    )
     response = api_request("GET", "/api/state")
     if response.get("exists") is False:
         return None
@@ -134,6 +182,7 @@ def save_runtime_to_cloudflare(runtime):
 def main():
     monitor.TRACE_FILE.write_text("", encoding="utf-8")
     process_started_at = monitor.now_iso()
+    remote_runtime = {}
 
     monitor.save_runtime({
         "monitor_status": "starting",
@@ -145,6 +194,12 @@ def main():
 
     config = api_request("GET", "/api/config")
     monitor_enabled = bool(config.get("monitor_enabled", False))
+
+    try:
+        remote_runtime = load_remote_runtime()
+    except Exception as exc:
+        print(f"Cloudflare KV runtime取得に失敗したため、今回のruntimeは必ず保存します: {exc}")
+        remote_runtime = {}
 
     # TOSS状態の定期取得は、LINEの監視モードON/OFFとは独立して常時実行する。
     # monitor_enabled はLINE側の「○以外→○」通知を有効にするための設定であり、
@@ -172,8 +227,10 @@ def main():
             monitor.scan_once(playwright)
     finally:
         runtime = monitor.load_runtime()
-        if runtime:
+        if runtime and should_publish_runtime(runtime, remote_runtime):
             save_runtime_to_cloudflare(runtime)
+        elif runtime:
+            print("Cloudflare KV runtime保存スキップ: 前回保存から10分未満かつ正常状態です。")
 
     runtime = monitor.load_runtime()
     if runtime.get("monitor_status") != "ok":
@@ -182,10 +239,13 @@ def main():
         )
 
     current_state = read_local_state()
-    save_state_to_cloudflare(current_state)
+    if previous_state is None or not state_contents_equal(previous_state, current_state):
+        save_state_to_cloudflare(current_state)
+    else:
+        print("TOSS state保存スキップ: 前回と同一内容です。")
 
     print(
-        "TOSS取得＋KV保存 完了: "
+        "TOSS取得 完了: "
         f"statuses={len(current_state['statuses'])}"
     )
 
