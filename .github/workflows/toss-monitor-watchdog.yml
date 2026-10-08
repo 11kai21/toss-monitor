@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+  workflow_run:
+    workflows: ["TOSS Monitor Production"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -19,44 +22,60 @@ jobs:
     timeout-minutes: 3
 
     steps:
-      - name: Check production monitor
+      - name: Check production monitor health
         env:
           GH_TOKEN: ${{ github.token }}
           TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PRODUCTION_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           set -euo pipefail
 
           repo="${GITHUB_REPOSITORY}"
-          workflow="toss-monitor-production.yml"
+          workflow=".github/workflows/toss-monitor-production.yml"
+          production_workflow_name="TOSS Monitor Production"
           recovery_threshold_seconds=720
+
           now_epoch="$(date -u +%s)"
           today_jst="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
           jst_hour="$(TZ=Asia/Tokyo date +%H)"
 
+          # TOSS固定メンテナンス 03:00～04:00 JST
           if (( 10#${jst_hour} >= 3 && 10#${jst_hour} < 4 )); then
             echo "TOSS定期メンテナンス（03:00～04:00 JST）のため復旧判定を行いません。"
             exit 0
           fi
 
-          runs="$(gh api --silent "repos/${repo}/actions/workflows/${workflow}/runs?per_page=20")"
+          # 本体の実行中・起動待ちを確認。
+          # 健全なスキャン中にWatchdogが二重起動しないようにする。
+          runs="$(gh api --silent "repos/${repo}/actions/runs?per_page=100")"
 
-          active_count="$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"${runs}")"
+          active_count="$(jq --arg workflow "${workflow}" '
+            [
+              .workflow_runs[]
+              | select(.path == $workflow)
+              | select(.status == "queued" or .status == "in_progress")
+            ] | length
+          ' <<<"${runs}")"
+
           if (( active_count > 0 )); then
             echo "TOSS Monitorは稼働中または起動待ちです。復旧起動は行いません。"
             exit 0
           fi
 
+          # Cloudflare Runtimeを実際のTOSS取得成否の基準として使用する。
           runtime_http="$(curl --fail --silent --show-error \
             --connect-timeout 10 --max-time 20 \
             -H "Accept: application/json" \
             -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
             "https://toss-monitor-api.nbakaikai.workers.dev/api/runtime")"
 
+          # お知らせ由来のメンテナンスを最優先で除外。
           maintenance_until="$(jq -r '.maintenance_until // empty' <<<"${runtime_http}")"
           if [[ -n "${maintenance_until}" ]]; then
             maintenance_until_epoch="$(date -d "${maintenance_until}" +%s 2>/dev/null || echo 0)"
             if (( maintenance_until_epoch > now_epoch )); then
-              echo "お知らせ由来のメンテナンス終了時刻まで復旧起動を行いません。終了: ${maintenance_until}"
+              echo "お知らせ由来のメンテナンス中です。復旧起動を行いません。終了: ${maintenance_until}"
               exit 0
             fi
           fi
@@ -70,7 +89,7 @@ jobs:
           fi
 
           system_maintenance_now=false
-          while IFS=$'\t' read -r start_iso end_iso; do
+          while IFS=$'\\t' read -r start_iso end_iso; do
             [[ -z "${start_iso}" || -z "${end_iso}" ]] && continue
             start_epoch="$(date -d "${start_iso}" +%s 2>/dev/null || echo 0)"
             end_epoch="$(date -d "${end_iso}" +%s 2>/dev/null || echo 0)"
@@ -89,33 +108,76 @@ jobs:
             exit 0
           fi
 
-          last_completed_at="$(jq -r '
-            [.workflow_runs[]
-              | select(.status == "completed")
-              | select(.conclusion != null)]
-            | max_by(.completed_at // .updated_at)
-            | (.completed_at // .updated_at // empty)
-          ' <<<"${runs}")"
-
-          if [[ -z "${last_completed_at}" ]]; then
-            echo "完了済みのTOSS Monitor runが見つかりません。初回復旧起動を行います。"
-          else
-            last_completed_epoch="$(date -d "${last_completed_at}" +%s)"
-            age="$((now_epoch - last_completed_epoch))"
-
-            echo "最後の完了run: ${last_completed_at}"
-            echo "経過秒数: ${age}"
-
-            if (( age < recovery_threshold_seconds )); then
-              echo "停止判定の閾値未満です。復旧起動は行いません。"
+          # workflow_runで「失敗/キャンセル」が通知された場合は即時復旧。
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            if [[ "${PRODUCTION_CONCLUSION}" == "success" ]]; then
+              echo "直前のTOSS Monitorは成功終了しています。復旧起動は行いません。"
               exit 0
             fi
 
-            echo "12分以上新しいrunがないため、TOSS Monitorを復旧起動します。"
+            echo "直前のTOSS Monitorが ${PRODUCTION_CONCLUSION:-unknown} で終了したため、復旧起動を試みます。"
+          else
+            # schedule / 手動起動では、実際のTOSS取得成功時刻を監視。
+            last_success_at="$(jq -r '.last_success_at // empty' <<<"${runtime_http}")"
+
+            if [[ -n "${last_success_at}" ]]; then
+              last_success_epoch="$(date -d "${last_success_at}" +%s 2>/dev/null || echo 0)"
+            else
+              last_success_epoch=0
+            fi
+
+            if (( last_success_epoch > 0 )); then
+              age="$((now_epoch - last_success_epoch))"
+              echo "最後のTOSS取得成功: ${last_success_at}"
+              echo "成功からの経過秒数: ${age}"
+
+              if (( age < recovery_threshold_seconds )); then
+                echo "停止判定の閾値未満です。復旧起動は行いません。"
+                exit 0
+              fi
+
+              echo "12分以上TOSS取得成功がないため、復旧起動します。"
+            else
+              # Runtimeに成功時刻がない初期状態では、完了済み本体Runの有無を確認。
+              completed_count="$(jq --arg workflow "${workflow}" '
+                [
+                  .workflow_runs[]
+                  | select(.path == $workflow)
+                  | select(.status == "completed")
+                ] | length
+              ' <<<"${runs}")"
+
+              if (( completed_count == 0 )); then
+                echo "TOSS Monitorの完了履歴がなく、成功時刻もありません。初回復旧起動を行います。"
+              else
+                latest_created_at="$(jq -r --arg workflow "${workflow}" '
+                  [
+                    .workflow_runs[]
+                    | select(.path == $workflow)
+                    | select(.status == "completed")
+                  ]
+                  | max_by(.completed_at // .updated_at // .created_at)
+                  | (.completed_at // .updated_at // .created_at // empty)
+                ' <<<"${runs}")"
+
+                latest_epoch="$(date -d "${latest_created_at}" +%s 2>/dev/null || echo 0)"
+                age="$((now_epoch - latest_epoch))"
+
+                echo "最後の完了TOSS Monitor: ${latest_created_at}"
+                echo "経過秒数: ${age}"
+
+                if (( age < recovery_threshold_seconds )); then
+                  echo "停止判定の閾値未満です。復旧起動は行いません。"
+                  exit 0
+                fi
+
+                echo "12分以上新しい完了Runがないため、復旧起動します。"
+              fi
+            fi
           fi
 
           gh api --silent -X POST \
-            "repos/${repo}/actions/workflows/${workflow}/dispatches" \
+            "repos/${repo}/actions/workflows/toss-monitor-production.yml/dispatches" \
             -f ref=main
 
           echo "TOSS Monitorの復旧起動を要求しました。"
