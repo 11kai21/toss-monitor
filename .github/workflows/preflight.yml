@@ -63,6 +63,10 @@ jobs:
               "layoutChildBody:childForm:doChangeDate",
               "layoutChildBody:childForm:doPager",
           }, values.get("ALLOWED_ACTION_FIELDS")
+          assert values["MAINTENANCE_START_HOUR"] == 1, values.get("MAINTENANCE_START_HOUR")
+          assert values["MAINTENANCE_START_MINUTE"] == 0, values.get("MAINTENANCE_START_MINUTE")
+          assert values["MAINTENANCE_END_HOUR"] == 7, values.get("MAINTENANCE_END_HOUR")
+          assert values["MAINTENANCE_END_MINUTE"] == 0, values.get("MAINTENANCE_END_MINUTE")
 
           print("Critical TOSS configuration: OK")
           PY
@@ -99,7 +103,12 @@ jobs:
           grep -Fq 'function refreshMonitoringWindow(s,currentDay)' cloudflare/toss-line-bot.js
           grep -Fq 'const currentDay=today();' cloudflare/toss-line-bot.js
           grep -Fq 'const windowState=refreshMonitoringWindow(ls,currentDay);' cloudflare/toss-line-bot.js
-          echo "Monitoring date rollover logic: OK"
+          grep -Fq 'const NIGHT_PAUSE_START_HOUR = 1;' cloudflare/toss-line-bot.js
+          grep -Fq 'const NIGHT_PAUSE_END_HOUR = 7;' cloudflare/toss-line-bot.js
+          grep -Fq 'const STALE_MS = 900000;' cloudflare/toss-line-bot.js
+          grep -Fq 'if(jstHour>=NIGHT_PAUSE_START_HOUR&&jstHour<NIGHT_PAUSE_END_HOUR)return;' cloudflare/toss-line-bot.js
+          grep -Fq 'night_baseline_date!==currentDay' cloudflare/toss-line-bot.js
+          echo "Monitoring date rollover/night pause logic: OK"
           grep -Fq 'https://www.cm1.eprs.jp/TOSS/web/view/user/c005RsvEmptyState.html' cloudflare/toss-line-bot.js
           grep -Fq 'const DAY_MAX = 13;' cloudflare/toss-line-bot.js
           grep -Fq '【＝ 現在エラーはありません ＝】' cloudflare/toss-line-bot.js
