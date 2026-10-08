@@ -46,9 +46,9 @@ jobs:
             exit 0
           fi
 
-          # TOSS固定メンテナンス 03:00～04:00 JST
-          if (( 10#${jst_hour} >= 3 && 10#${jst_hour} < 4 )); then
-            echo "TOSS定期メンテナンス（03:00～04:00 JST）のため復旧判定を行いません。"
+          # システム側の夜間停止 01:00～07:00 JST
+          if (( 10#${jst_hour} >= 1 && 10#${jst_hour} < 7 )); then
+            echo "01:00～07:00 JSTの夜間停止時間のため復旧判定を行いません。"
             exit 0
           fi
 
