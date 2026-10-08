@@ -80,16 +80,41 @@ async function webhook(data){
   for(const e of data.events||[]){const id=e.webhookEventId;if(id&&seen.has(id))continue;const uid=e.source?.userId;if(typeof LINE_ALLOWED_USER_ID==="undefined"||!LINE_ALLOWED_USER_ID||uid!==LINE_ALLOWED_USER_ID){if(id)seen.add(id);continue;}try{if(e.type==="postback")await postback(e)}catch(err){await lineError("Webhook処理失敗: "+err)}if(id)seen.add(id);}
   const n=await lineState();n.processed_event_ids=Array.from(seen).slice(-200);await saveLine(n);
 }
+function refreshMonitoringWindow(s,currentDay){
+  const m=s.monitoring;
+  if(!m?.enabled)return{active:false,ended:false,changed:false};
+  const st=dateOk(m.start_date)?m.start_date:null;
+  const ed=dateOk(m.end_date)?m.end_date:null;
+  if(!st||!ed)return{active:true,ended:false,changed:false};
+  if(currentDay>ed)return{active:false,ended:true,changed:false,previous_start:st,previous_end:ed};
+  if(st<currentDay){m.start_date=currentDay;return{active:true,ended:false,changed:true,previous_start:st,previous_end:ed};}
+  return{active:true,ended:false,changed:false,previous_start:st,previous_end:ed};
+}
 async function scheduledTask(){
   const c=await config();if(!c.monitor_enabled)return;let ls=await lineState(),r=await runtime();
   const scheduledStateBefore=JSON.stringify(ls);
   if(!ls.monitoring?.enabled)return;
+
+  const currentDay=today();
+  const windowState=refreshMonitoringWindow(ls,currentDay);
+  if(windowState.ended){
+    try{await push(["監視期間が終了しました。\n期間："+windowState.previous_start.replaceAll("-","/")+" ～ "+windowState.previous_end.replaceAll("-","/")],false)}
+    catch(err){await lineError("監視終了通知失敗: "+err)}
+    ls.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};
+    ls.last_seen_state_saved_at=null;
+    ls.last_toss_alert_signature=null;
+    ls.last_toss_runtime_signature=null;
+    ls.monitor_stale_notified=false;
+    await setConfig(false);
+    if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
+    return;
+  }
+
   const en=Date.parse(ls.monitoring.enabled_at||""),ru=Date.parse(r.updated_at||"");
   const er=r.errors&&typeof r.errors==="object"?r.errors:{};const payload={};for(const k of ERRORS)if(k!=="LINE送信エラー"&&er[k])payload[k]=er[k];const es=JSON.stringify(payload);
   if(Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){if(es&&es!==ls.last_toss_runtime_signature){if(ls.last_toss_runtime_signature!==null)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}ls.last_toss_runtime_signature=es}else if(!es&&ls.last_toss_runtime_signature){try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}ls.last_toss_runtime_signature=null;}}
   try{const cur=(await tossState()).state,saved=String(cur.saved_at||""),st=dateOk(ls.monitoring.start_date)?ls.monitoring.start_date:null,ed=dateOk(ls.monitoring.end_date)?ls.monitoring.end_date:null;
-    if(saved&&st&&ed){if(today()>ed){try{await push(["監視期間が終了しました。\n期間："+st.replaceAll("-","/")+" ～ "+ed.replaceAll("-","/")],false)}catch(err){await lineError("監視終了通知失敗: "+err)}ls.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};ls.last_seen_state_saved_at=null;await setConfig(false);}
-    else if(!ls.last_seen_state_saved_at){ls.last_seen_state_saved_at=saved;}
+    if(saved&&st&&ed){if(!ls.last_seen_state_saved_at){ls.last_seen_state_saved_at=saved;}
     else if(saved!==ls.last_seen_state_saved_at&&(!ls.monitoring.enabled_at||Date.parse(saved)>=Date.parse(ls.monitoring.enabled_at))){let prev={statuses:{}};try{prev=await read(STATE_BAK_KEY,{statuses:{}})}catch{}const changes=[];
       for(const[k,v]of Object.entries(cur.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|"),dd=p[0],d2=dateOk(dd)?dd:null;if(!d2||d2<st||d2>ed)continue;const old=prev.statuses?.[k];if(!old||old.status==="空き")continue;changes.push({date:dd,facility:v.facility||"不明",item:v.item||"不明",time_name:v.time_name||p[2],card_no:v.card_no==null?p[1]:v.card_no,from:old.status});}
       changes.sort((a,b)=>[a.date,hour(a.time_name)??99,Number(a.card_no)||9999,a.time_name].join("|").localeCompare([b.date,hour(b.time_name)??99,Number(b.card_no)||9999,b.time_name].join("|")));
