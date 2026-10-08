@@ -21,9 +21,13 @@ jobs:
         id: pause
         run: |
           today_jst="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
+          jst_hour="$(TZ=Asia/Tokyo date +%H)"
           if [[ "$today_jst" == "2026-10-16" || "$today_jst" == "2026-10-17" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "TOSSは ${today_jst} は終日休止します。"
+          elif (( 10#${jst_hour} >= 1 && 10#${jst_hour} < 7 )); then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "01:00～07:00 JSTの夜間停止時間のため、このrunは停止します。"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
