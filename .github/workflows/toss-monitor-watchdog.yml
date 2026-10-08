@@ -22,6 +22,7 @@ jobs:
       - name: Check production monitor
         env:
           GH_TOKEN: ${{ github.token }}
+          TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -29,11 +30,67 @@ jobs:
           workflow="toss-monitor-production.yml"
           recovery_threshold_seconds=720
 
+          jst_hour="$(TZ=Asia/Tokyo date +%H)"
+          if (( 10#${jst_hour} >= 3 && 10#${jst_hour} < 4 )); then
+            echo "TOSS定期メンテナンス（03:00～04:00 JST）のため復旧判定を行いません。"
+            exit 0
+          fi
+
           runs="$(gh api --silent "repos/${repo}/actions/workflows/${workflow}/runs?per_page=20")"
 
           active_count="$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"${runs}")"
           if (( active_count > 0 )); then
             echo "TOSS Monitorは稼働中または起動待ちです。復旧起動は行いません。"
+            exit 0
+          fi
+
+          runtime_http="$(curl --fail --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -H "Accept: application/json" \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            "https://toss-monitor-api.nbakaikai.workers.dev/api/runtime")"
+
+          now_epoch="$(date -u +%s)"
+          maintenance_now="$(jq -r --argjson now "${now_epoch}" '
+            def current_in_window:
+              any(
+                (.system_maintenance_windows // [])[]?;
+                (try (fromdateiso8601) catch -1) as $dummy
+              );
+            if ((.monitor_status // "") == "maintenance")
+               and ((.maintenance_until // "") != "")
+               and ((try (.maintenance_until | fromdateiso8601) catch 0) > $now)
+            then "runtime_until"
+            elif (
+              [.system_maintenance_windows // [] | .[]?
+                | select(
+                    (try (.start | fromdateiso8601) catch 0) <= $now
+                    and
+                    (try (.end | fromdateiso8601) catch 0) > $now
+                  )
+              ] | length
+            ) > 0
+            then "system_window"
+            elif (
+              [.maintenance_dates // [] | .[]?] as $dates
+              | ((now | strftime("%Y-%m-%d")) as $today
+                 | any($dates[]?; . == $today))
+            )
+            then "full_day"
+            else ""
+            end
+          ' <<<"${runtime_http}")"
+
+          if [[ "${maintenance_now}" == "runtime_until" ]]; then
+            echo "TOSSはお知らせ由来のメンテナンス期間中です。復旧起動は行いません。"
+            exit 0
+          fi
+          if [[ "${maintenance_now}" == "system_window" ]]; then
+            echo "TOSSはお知らせ由来のシステムメンテナンス時間帯です。復旧起動は行いません。"
+            exit 0
+          fi
+          if [[ "${maintenance_now}" == "full_day" ]]; then
+            echo "TOSSはお知らせで本日が終日メンテナンス対象です。復旧起動は行いません。"
             exit 0
           fi
 
@@ -49,7 +106,6 @@ jobs:
             echo "完了済みのTOSS Monitor runが見つかりません。初回復旧起動を行います。"
           else
             last_completed_epoch="$(date -d "${last_completed_at}" +%s)"
-            now_epoch="$(date -u +%s)"
             age="$((now_epoch - last_completed_epoch))"
 
             echo "最後の完了run: ${last_completed_at}"
