@@ -2,6 +2,9 @@ name: TOSS Monitor Production
 
 on:
   workflow_dispatch:
+  # Bootstrap only: this condition below prevents later ordinary pushes from starting a chain.
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,6 +16,7 @@ concurrency:
 
 jobs:
   monitor:
+    if: github.event_name != 'push' || github.event.head_commit.message == 'Bootstrap scheduler'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -68,5 +72,5 @@ jobs:
           else
             echo "取得処理が5分を超えたため待機なし"
           fi
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/dispatches" -f ref=main
+          gh api --silent -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/dispatches" -f ref=main
           echo "次回TOSS Monitor runを起動しました"
