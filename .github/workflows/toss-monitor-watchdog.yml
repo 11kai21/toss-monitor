@@ -1,0 +1,70 @@
+name: TOSS Monitor Watchdog
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: toss-monitor-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+
+    steps:
+      - name: Check production monitor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY}"
+          workflow="toss-monitor-production.yml"
+          recovery_threshold_seconds=720
+
+          runs="$(gh api --silent "repos/${repo}/actions/workflows/${workflow}/runs?per_page=20")"
+
+          active_count="$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"${runs}")"
+          if (( active_count > 0 )); then
+            echo "TOSS Monitorは稼働中または起動待ちです。復旧起動は行いません。"
+            exit 0
+          fi
+
+          last_completed_at="$(jq -r '
+            [.workflow_runs[]
+              | select(.status == "completed")
+              | select(.conclusion != null)]
+            | max_by(.completed_at // .updated_at)
+            | (.completed_at // .updated_at // empty)
+          ' <<<"${runs}")"
+
+          if [[ -z "${last_completed_at}" ]]; then
+            echo "完了済みのTOSS Monitor runが見つかりません。初回復旧起動を行います。"
+          else
+            last_completed_epoch="$(date -d "${last_completed_at}" +%s)"
+            now_epoch="$(date -u +%s)"
+            age="$((now_epoch - last_completed_epoch))"
+
+            echo "最後の完了run: ${last_completed_at}"
+            echo "経過秒数: ${age}"
+
+            if (( age < recovery_threshold_seconds )); then
+              echo "停止判定の閾値未満です。復旧起動は行いません。"
+              exit 0
+            fi
+
+            echo "12分以上新しいrunがないため、TOSS Monitorを復旧起動します。"
+          fi
+
+          gh api --silent -X POST \
+            "repos/${repo}/actions/workflows/${workflow}/dispatches" \
+            -f ref=main
+
+          echo "TOSS Monitorの復旧起動を要求しました。"
