@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -81,6 +82,29 @@ def state_contents_equal(a, b):
         and a.get("maintenance_dates") == b.get("maintenance_dates")
         and a.get("system_maintenance_windows") == b.get("system_maintenance_windows")
     )
+
+
+def is_first_post_night_scan(previous_state):
+    if not isinstance(previous_state, dict):
+        return True
+
+    now_jst = datetime.now(timezone(timedelta(hours=9)))
+    if now_jst.hour < 7:
+        return False
+
+    saved_at = previous_state.get("saved_at")
+    if not saved_at:
+        return True
+
+    try:
+        saved_epoch = datetime.fromisoformat(
+            str(saved_at).replace("Z", "+00:00").replace(" ", "T")
+        ).replace(tzinfo=timezone(timedelta(hours=9))).timestamp()
+    except (TypeError, ValueError):
+        return True
+
+    today_start = now_jst.replace(hour=7, minute=0, second=0, microsecond=0)
+    return saved_epoch < today_start.timestamp()
 
 
 def write_local_state(state):
@@ -192,7 +216,8 @@ def main():
         )
 
     current_state = read_local_state()
-    if previous_state is None or not state_contents_equal(previous_state, current_state):
+    first_post_night_scan = is_first_post_night_scan(previous_state)
+    if previous_state is None or first_post_night_scan or not state_contents_equal(previous_state, current_state):
         save_state_to_cloudflare(current_state)
     else:
         print("TOSS state保存スキップ: 前回と同一内容です。")
