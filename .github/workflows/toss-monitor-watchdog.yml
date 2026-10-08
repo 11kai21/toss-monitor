@@ -33,7 +33,6 @@ jobs:
 
           repo="${GITHUB_REPOSITORY}"
           workflow=".github/workflows/toss-monitor-production.yml"
-          production_workflow_name="TOSS Monitor Production"
           recovery_threshold_seconds=720
 
           now_epoch="$(date -u +%s)"
@@ -46,14 +45,15 @@ jobs:
             exit 0
           fi
 
-          # 本体の実行中・起動待ちを確認。
-          # 健全なスキャン中にWatchdogが二重起動しないようにする。
+          # 本番として有効な workflow_dispatch Run だけを監視する。
+          # 過去のBootstrap用push Runは復旧判定へ影響させない。
           runs="$(gh api --silent "repos/${repo}/actions/runs?per_page=100")"
 
           active_count="$(jq --arg workflow "${workflow}" '
             [
               .workflow_runs[]
               | select(.path == $workflow)
+              | select(.event == "workflow_dispatch")
               | select(.status == "queued" or .status == "in_progress")
             ] | length
           ' <<<"${runs}")"
@@ -108,7 +108,7 @@ jobs:
             exit 0
           fi
 
-          # workflow_runで「失敗/キャンセル」が通知された場合は即時復旧。
+          # 本体Run失敗/キャンセル時は、メンテナンスでない限り即時復旧。
           if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
             if [[ "${PRODUCTION_CONCLUSION}" == "success" ]]; then
               echo "直前のTOSS Monitorは成功終了しています。復旧起動は行いません。"
@@ -138,11 +138,11 @@ jobs:
 
               echo "12分以上TOSS取得成功がないため、復旧起動します。"
             else
-              # Runtimeに成功時刻がない初期状態では、完了済み本体Runの有無を確認。
               completed_count="$(jq --arg workflow "${workflow}" '
                 [
                   .workflow_runs[]
                   | select(.path == $workflow)
+                  | select(.event == "workflow_dispatch")
                   | select(.status == "completed")
                 ] | length
               ' <<<"${runs}")"
@@ -154,6 +154,7 @@ jobs:
                   [
                     .workflow_runs[]
                     | select(.path == $workflow)
+                    | select(.event == "workflow_dispatch")
                     | select(.status == "completed")
                   ]
                   | max_by(.completed_at // .updated_at // .created_at)
