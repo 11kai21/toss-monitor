@@ -10,7 +10,7 @@ const HOURS = [9,13,17];
 const WD = ["月","火","水","木","金","土","日"];
 const ERRORS = ["TOSS取得エラー","お知らせ取得エラー","TOSSページ構造エラー","状態ファイルエラー","LINE送信エラー"];
 const MAX_BODY = 262144;
-const STALE_MS = 900000;
+const STALE_MS = 600000;
 const NIGHT_PAUSE_START_HOUR = 1;
 const NIGHT_PAUSE_END_HOUR = 7;
 
