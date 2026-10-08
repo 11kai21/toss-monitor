@@ -38,10 +38,10 @@ REQUEST_GAP_SECONDS = 0.20
 HTTP_TIMEOUT_MS = 20_000
 CHECK_INTERVAL_SECONDS = 5 * 60
 
-# TOSSメンテナンス時間（JST）
-MAINTENANCE_START_HOUR = 3
+# システム側の夜間停止時間（JST）。TOSS取得・通知処理を行わない。
+MAINTENANCE_START_HOUR = 1
 MAINTENANCE_START_MINUTE = 0
-MAINTENANCE_END_HOUR = 4
+MAINTENANCE_END_HOUR = 7
 MAINTENANCE_END_MINUTE = 0
 
 INITIAL_SCAN_NOTIFY = False
@@ -109,7 +109,7 @@ def is_maintenance_time(dt=None):
 def ensure_not_maintenance():
     if is_maintenance_time():
         raise MaintenanceWindowError(
-            "TOSSメンテナンス時間（03:00～04:00）のため監視を中断します。"
+            "夜間停止時間（01:00～07:00）のため監視を中断します。"
         )
 
 
@@ -133,7 +133,7 @@ def save_maintenance_status(reason=None):
         lines.append(reason)
     else:
         lines.append(
-            "TOSSのメンテナンス時間（03:00～04:00）のため監視を停止しています。"
+            "夜間停止時間（01:00～07:00）のため監視を停止しています。"
         )
     save_result("\n".join(lines))
 
@@ -2214,15 +2214,15 @@ def main():
     try:
         with sync_playwright() as p:
             while True:
-                # 03:00～04:00はTOSSへのアクセスを行わない。
+                # 01:00～07:00はTOSSへのアクセスを行わない。
                 if is_maintenance_time():
                     save_maintenance_status()
                     sleep_seconds = seconds_until_maintenance_end()
                     trace(
-                        "TOSSメンテナンス中（03:00～04:00）のため監視を停止します。"
+                        "夜間停止時間（01:00～07:00）のため監視を停止します。"
                     )
                     trace(
-                        f"04:00まで {sleep_seconds:.1f}秒待機します。"
+                        f"07:00まで {sleep_seconds:.1f}秒待機します。"
                     )
                     time.sleep(sleep_seconds)
                     trace("メンテナンス終了。次の監視を開始します。")
@@ -2280,7 +2280,7 @@ def main():
                     save_runtime({
                         "monitor_status": "maintenance",
                         "maintenance_reason": str(exc),
-                        "maintenance_until": (datetime.now(JST).date().isoformat() + "T04:00:00+09:00"),
+                        "maintenance_until": (datetime.now(JST).date().isoformat() + "T07:00:00+09:00"),
                         "errors": {
                             "TOSS取得エラー": None,
                             "お知らせ取得エラー": None,
@@ -2294,7 +2294,7 @@ def main():
                     trace(str(exc))
                     sleep_seconds = seconds_until_maintenance_end()
                     trace(
-                        f"メンテナンス終了まで {sleep_seconds:.1f}秒待機します。"
+                        f"夜間停止終了まで {sleep_seconds:.1f}秒待機します。"
                     )
                     time.sleep(sleep_seconds)
                     trace("メンテナンス終了。次の監視を開始します。")
