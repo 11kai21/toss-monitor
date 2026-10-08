@@ -102,9 +102,6 @@ async function scheduledTask(){
     catch(err){await lineError("監視終了通知失敗: "+err)}
     ls.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};
     ls.last_seen_state_saved_at=null;
-    ls.last_toss_alert_signature=null;
-    ls.last_toss_runtime_signature=null;
-    ls.monitor_stale_notified=false;
     await setConfig(false);
     if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
     return;
