@@ -157,8 +157,8 @@ def save_state_to_cloudflare(state):
 
     print(
         "Cloudflare KV保存成功: "
-        f"bytes={response.get("bytes")}, "
-        f"backup_saved={response.get("backup_saved")}"
+        f"bytes={response.get('bytes')}, "
+        f"backup_saved={response.get('backup_saved')}"
     )
 
 
@@ -175,7 +175,7 @@ def save_runtime_to_cloudflare(runtime):
 
     print(
         "Cloudflare KV runtime保存成功: "
-        f"bytes={response.get("bytes")}"
+        f"bytes={response.get('bytes')}"
     )
 
 
