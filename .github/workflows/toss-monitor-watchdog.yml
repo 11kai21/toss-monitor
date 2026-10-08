@@ -39,6 +39,13 @@ jobs:
           today_jst="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
           jst_hour="$(TZ=Asia/Tokyo date +%H)"
 
+          # 結婚式前日・当日はTOSSシステムを完全休止。
+          # Watchdog自身もAPI/KV確認や復旧起動を行わない。
+          if [[ "$today_jst" == "2026-10-16" || "$today_jst" == "2026-10-17" ]]; then
+            echo "TOSSは $today_jst は終日休止中のためWatchdogを停止します。"
+            exit 0
+          fi
+
           # TOSS固定メンテナンス 03:00～04:00 JST
           if (( 10#${jst_hour} >= 3 && 10#${jst_hour} < 4 )); then
             echo "TOSS定期メンテナンス（03:00～04:00 JST）のため復旧判定を行いません。"

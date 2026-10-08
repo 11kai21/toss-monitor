@@ -17,32 +17,49 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Check TOSS wedding-date pause
+        id: pause
+        run: |
+          today_jst="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
+          if [[ "$today_jst" == "2026-10-16" || "$today_jst" == "2026-10-17" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "TOSSは ${today_jst} は終日休止します。"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Mark cycle start
+        if: steps.pause.outputs.skip != 'true'
         run: echo "CYCLE_START=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Checkout
+        if: steps.pause.outputs.skip != 'true'
         uses: actions/checkout@v7
 
       - name: Set up Python
+        if: steps.pause.outputs.skip != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - name: Install Python packages
+        if: steps.pause.outputs.skip != 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
       - name: Install Chromium
+        if: steps.pause.outputs.skip != 'true'
         run: python -m playwright install --with-deps chromium
 
       - name: Run TOSS monitor once
+        if: steps.pause.outputs.skip != 'true'
         env:
           TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
         run: python toss_monitor_github.py
 
       - name: Save diagnostics
-        if: always()
+        if: always() && steps.pause.outputs.skip != 'true'
         uses: actions/upload-artifact@v6
         with:
           name: toss-monitor-diagnostics-${{ github.run_id }}
@@ -53,7 +70,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Start next 5-minute cycle
-        if: always()
+        if: always() && steps.pause.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
