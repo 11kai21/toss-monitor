@@ -105,7 +105,7 @@ jobs:
           grep -Fq 'const windowState=refreshMonitoringWindow(ls,currentDay);' cloudflare/toss-line-bot.js
           grep -Fq 'const NIGHT_PAUSE_START_HOUR = 1;' cloudflare/toss-line-bot.js
           grep -Fq 'const NIGHT_PAUSE_END_HOUR = 7;' cloudflare/toss-line-bot.js
-          grep -Fq 'const STALE_MS = 900000;' cloudflare/toss-line-bot.js
+          grep -Fq 'const STALE_MS = 600000;' cloudflare/toss-line-bot.js
           grep -Fq 'if(jstHour>=NIGHT_PAUSE_START_HOUR&&jstHour<NIGHT_PAUSE_END_HOUR)return;' cloudflare/toss-line-bot.js
           grep -Fq 'night_baseline_date!==currentDay' cloudflare/toss-line-bot.js
           echo "Monitoring date rollover/night pause logic: OK"
