@@ -29,8 +29,10 @@ jobs:
           repo="${GITHUB_REPOSITORY}"
           workflow="toss-monitor-production.yml"
           recovery_threshold_seconds=720
-
+          now_epoch="$(date -u +%s)"
+          today_jst="$(TZ=Asia/Tokyo date +%Y-%m-%d)"
           jst_hour="$(TZ=Asia/Tokyo date +%H)"
+
           if (( 10#${jst_hour} >= 3 && 10#${jst_hour} < 4 )); then
             echo "TOSS定期メンテナンス（03:00～04:00 JST）のため復旧判定を行いません。"
             exit 0
@@ -50,47 +52,40 @@ jobs:
             -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
             "https://toss-monitor-api.nbakaikai.workers.dev/api/runtime")"
 
-          now_epoch="$(date -u +%s)"
-          maintenance_now="$(jq -r --argjson now "${now_epoch}" '
-            def current_in_window:
-              any(
-                (.system_maintenance_windows // [])[]?;
-                (try (fromdateiso8601) catch -1) as $dummy
-              );
-            if ((.monitor_status // "") == "maintenance")
-               and ((.maintenance_until // "") != "")
-               and ((try (.maintenance_until | fromdateiso8601) catch 0) > $now)
-            then "runtime_until"
-            elif (
-              [.system_maintenance_windows // [] | .[]?
-                | select(
-                    (try (.start | fromdateiso8601) catch 0) <= $now
-                    and
-                    (try (.end | fromdateiso8601) catch 0) > $now
-                  )
-              ] | length
-            ) > 0
-            then "system_window"
-            elif (
-              [.maintenance_dates // [] | .[]?] as $dates
-              | ((now | strftime("%Y-%m-%d")) as $today
-                 | any($dates[]?; . == $today))
-            )
-            then "full_day"
-            else ""
-            end
-          ' <<<"${runtime_http}")"
+          maintenance_until="$(jq -r '.maintenance_until // empty' <<<"${runtime_http}")"
+          if [[ -n "${maintenance_until}" ]]; then
+            maintenance_until_epoch="$(date -d "${maintenance_until}" +%s 2>/dev/null || echo 0)"
+            if (( maintenance_until_epoch > now_epoch )); then
+              echo "お知らせ由来のメンテナンス終了時刻まで復旧起動を行いません。終了: ${maintenance_until}"
+              exit 0
+            fi
+          fi
 
-          if [[ "${maintenance_now}" == "runtime_until" ]]; then
-            echo "TOSSはお知らせ由来のメンテナンス期間中です。復旧起動は行いません。"
+          maintenance_dates_today="$(jq -r --arg today "${today_jst}" '
+            any((.maintenance_dates // [])[]?; . == $today)
+          ' <<<"${runtime_http}")"
+          if [[ "${maintenance_dates_today}" == "true" ]]; then
+            echo "お知らせで本日（${today_jst}）が終日メンテナンス対象のため復旧起動を行いません。"
             exit 0
           fi
-          if [[ "${maintenance_now}" == "system_window" ]]; then
-            echo "TOSSはお知らせ由来のシステムメンテナンス時間帯です。復旧起動は行いません。"
-            exit 0
-          fi
-          if [[ "${maintenance_now}" == "full_day" ]]; then
-            echo "TOSSはお知らせで本日が終日メンテナンス対象です。復旧起動は行いません。"
+
+          system_maintenance_now=false
+          while IFS=$'\t' read -r start_iso end_iso; do
+            [[ -z "${start_iso}" || -z "${end_iso}" ]] && continue
+            start_epoch="$(date -d "${start_iso}" +%s 2>/dev/null || echo 0)"
+            end_epoch="$(date -d "${end_iso}" +%s 2>/dev/null || echo 0)"
+            if (( start_epoch > 0 && end_epoch > 0 && start_epoch <= now_epoch && end_epoch > now_epoch )); then
+              system_maintenance_now=true
+              echo "お知らせ由来のシステムメンテナンス時間帯です。復旧起動を行いません。"
+              break
+            fi
+          done < <(jq -r '
+            (.system_maintenance_windows // [])[]?
+            | [(.start // ""), (.end // "")]
+            | @tsv
+          ' <<<"${runtime_http}")
+
+          if [[ "${system_maintenance_now}" == "true" ]]; then
             exit 0
           fi
 
