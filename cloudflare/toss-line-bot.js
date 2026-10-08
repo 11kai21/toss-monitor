@@ -117,21 +117,16 @@ async function scheduledTask(){
   const er=r.errors&&typeof r.errors==="object"?r.errors:{};const payload={};for(const k of ERRORS)if(k!=="LINE送信エラー"&&er[k])payload[k]=er[k];const es=JSON.stringify(payload);
   if(Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){if(es&&es!==ls.last_toss_runtime_signature){if(ls.last_toss_runtime_signature!==null)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}ls.last_toss_runtime_signature=es}else if(!es&&ls.last_toss_runtime_signature){try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}ls.last_toss_runtime_signature=null;}}
 
-  let currentState=null,nightBaselineJustSet=false;
+  let currentState=null;
   try{currentState=(await tossState()).state;}catch(err){await lineError("監視状態比較失敗: "+err);}
   if(currentState){
     const saved=String(currentState.saved_at||"");
     const st=dateOk(ls.monitoring.start_date)?ls.monitoring.start_date:null,ed=dateOk(ls.monitoring.end_date)?ls.monitoring.end_date:null;
     const savedEpoch=Date.parse(saved),todayStart=Date.parse(currentDay+"T07:00:00+09:00");
-    if(ls.night_baseline_date!==currentDay&&Number.isFinite(savedEpoch)&&savedEpoch>=todayStart){
-      ls.night_baseline_date=currentDay;
-      ls.last_seen_state_saved_at=saved;
-      ls.last_toss_alert_signature=null;
-      nightBaselineJustSet=true;
-    }
-    if(saved&&st&&ed&&!nightBaselineJustSet){
-      if(!ls.last_seen_state_saved_at){ls.last_seen_state_saved_at=saved;}
-      else if(saved!==ls.last_seen_state_saved_at&&(!ls.monitoring.enabled_at||Date.parse(saved)>=Date.parse(ls.monitoring.enabled_at))){
+    const firstPostNightState=ls.night_baseline_date!==currentDay&&Number.isFinite(savedEpoch)&&savedEpoch>=todayStart;
+    if(saved&&st&&ed){
+      const shouldCompare=firstPostNightState||(!ls.last_seen_state_saved_at?true:(saved!==ls.last_seen_state_saved_at&&(!ls.monitoring.enabled_at||Date.parse(saved)>=Date.parse(ls.monitoring.enabled_at))));
+      if(shouldCompare){
         let prev={statuses:{}};try{prev=await read(STATE_BAK_KEY,{statuses:{}})}catch{}
         const changes=[];
         for(const[k,v]of Object.entries(currentState.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|"),dd=p[0],d2=dateOk(dd)?dd:null;if(!d2||d2<st||d2>ed)continue;const old=prev.statuses?.[k];if(!old||old.status==="空き")continue;changes.push({date:dd,facility:v.facility||"不明",item:v.item||"不明",time_name:v.time_name||p[2],card_no:v.card_no==null?p[1]:v.card_no,from:old.status});}
@@ -139,6 +134,7 @@ async function scheduledTask(){
         if(changes.length){const sig=btoa(unescape(encodeURIComponent(JSON.stringify(changes))));if(sig!==ls.last_toss_alert_signature){try{await push(["===== 空きが出ました =====","最終取得："+fresh(currentState.saved_at),"",...changes.map(x=>"■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL)],false);ls.last_toss_alert_signature=sig}catch(err){await lineError("空き化通知失敗: "+err)}}}
         else ls.last_toss_alert_signature=null;
         ls.last_seen_state_saved_at=saved;
+        if(firstPostNightState)ls.night_baseline_date=currentDay;
       }
     }
   }
