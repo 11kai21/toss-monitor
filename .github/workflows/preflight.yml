@@ -1,9 +1,7 @@
 name: TOSS Preflight Validation
 
 on:
-  # 一時的にpushでも実行して、この変更内容をGitHub Actions上で実測検証する。
-  push:
-    branches: [main]
+  # 本番化時に push / pull_request を復活させる。
   workflow_dispatch:
 
 permissions:
