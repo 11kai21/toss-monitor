@@ -96,6 +96,10 @@ jobs:
         run: |
           set -euo pipefail
           node --check cloudflare/toss-line-bot.js
+          grep -Fq 'function refreshMonitoringWindow(s,currentDay)' cloudflare/toss-line-bot.js
+          grep -Fq 'const currentDay=today();' cloudflare/toss-line-bot.js
+          grep -Fq 'const windowState=refreshMonitoringWindow(ls,currentDay);' cloudflare/toss-line-bot.js
+          echo "Monitoring date rollover logic: OK"
           grep -Fq 'https://www.cm1.eprs.jp/TOSS/web/view/user/c005RsvEmptyState.html' cloudflare/toss-line-bot.js
           grep -Fq 'const DAY_MAX = 13;' cloudflare/toss-line-bot.js
           grep -Fq '【＝ 現在エラーはありません ＝】' cloudflare/toss-line-bot.js
