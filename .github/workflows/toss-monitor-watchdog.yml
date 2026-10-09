@@ -53,15 +53,15 @@ jobs:
             exit 0
           fi
 
-          # 本番として有効な workflow_dispatch Run だけを監視する。
+          # 本番の手動・定時実行を監視する。
           # 過去のBootstrap用push Runは復旧判定へ影響させない。
-          runs="$(gh api --silent "repos/${repo}/actions/runs?per_page=100")"
+          runs="$(gh api "repos/${repo}/actions/runs?per_page=100")"
 
           active_count="$(jq --arg workflow "${workflow}" '
             [
               .workflow_runs[]
               | select(.path == $workflow)
-              | select(.event == "workflow_dispatch")
+              | select(.event == "workflow_dispatch" or .event == "schedule")
               | select(.status == "queued" or .status == "in_progress")
             ] | length
           ' <<<"${runs}")"
@@ -150,7 +150,7 @@ jobs:
                 [
                   .workflow_runs[]
                   | select(.path == $workflow)
-                  | select(.event == "workflow_dispatch")
+                  | select(.event == "workflow_dispatch" or .event == "schedule")
                   | select(.status == "completed")
                 ] | length
               ' <<<"${runs}")"
@@ -162,7 +162,7 @@ jobs:
                   [
                     .workflow_runs[]
                     | select(.path == $workflow)
-                    | select(.event == "workflow_dispatch")
+                    | select(.event == "workflow_dispatch" or .event == "schedule")
                     | select(.status == "completed")
                   ]
                   | max_by(.completed_at // .updated_at // .created_at)
