@@ -1,6 +1,9 @@
 name: TOSS Monitor Production
 
 on:
+  # 毎朝07:00 JSTに監視サイクルを再開（夜間停止で自己連鎖が途切れた場合の復旧用）。
+  schedule:
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 permissions:
