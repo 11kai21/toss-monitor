@@ -115,7 +115,23 @@ async function scheduledTask(){
 
   const en=Date.parse(ls.monitoring.enabled_at||""),ru=Date.parse(r.updated_at||"");
   const er=r.errors&&typeof r.errors==="object"?r.errors:{};const payload={};for(const k of ERRORS)if(k!=="LINE送信エラー"&&er[k])payload[k]=er[k];const es=JSON.stringify(payload);
-  if(Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){if(es&&es!==ls.last_toss_runtime_signature){if(ls.last_toss_runtime_signature!==null)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}ls.last_toss_runtime_signature=es}else if(!es&&ls.last_toss_runtime_signature){try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}ls.last_toss_runtime_signature=null;}}
+  const hasRuntimeErrors=Object.keys(payload).length>0;
+  let hadRuntimeErrors=!!ls.last_toss_runtime_signature;
+  if(hadRuntimeErrors){try{hadRuntimeErrors=Object.keys(JSON.parse(ls.last_toss_runtime_signature)).length>0}catch{hadRuntimeErrors=true}}
+  // 起動中のruntimeには前回エラーが残る場合があるため、取得結果が確定するまで通知判定しない。
+  // 予定メンテナンス中は、エラー状態を変化・通知させず、そのまま保持する。
+  const runtimeReady=r.monitor_status!=="starting"&&r.monitor_status!=="running";
+  if(r.monitor_status!=="maintenance"&&runtimeReady&&Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){
+    if(hasRuntimeErrors){
+      if(!hadRuntimeErrors)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}
+      // エラー内容が変化しても、継続中の同一障害として1回だけ通知する。
+      ls.last_toss_runtime_signature=es;
+    }else{
+      if(hadRuntimeErrors)try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}
+      // 旧版で保存された空オブジェクト"{}"も、復旧通知せず静かに解除する。
+      ls.last_toss_runtime_signature=null;
+    }
+  }
 
   let currentState=null;
   try{currentState=(await tossState()).state;}catch(err){await lineError("監視状態比較失敗: "+err);}
@@ -139,7 +155,23 @@ async function scheduledTask(){
     }
   }
 
-  if(r.monitor_status!=="maintenance"){const last=r.last_scan_started_at||r.updated_at,ts=Date.parse(last||"");if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){const age=Date.now()-ts;if(age>STALE_MS&&!ls.monitor_stale_notified){try{await push(["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],false)}catch(err){await lineError("監視停止疑い通知失敗: "+err)}ls.monitor_stale_notified=true}else if(age<=STALE_MS&&ls.monitor_stale_notified){try{await push(["TOSS監視の動作を確認しました。監視を再開しています。"],false)}catch(err){await lineError("監視復帰通知失敗: "+err)}ls.monitor_stale_notified=false;}}}
+  if(r.monitor_status==="maintenance"){
+    // 予定された停止は異常停止として扱わず、以前の停止疑い通知フラグも黙って解除する。
+    ls.monitor_stale_notified=false;
+  }else{
+    const last=r.last_scan_started_at||r.updated_at,ts=Date.parse(last||"");
+    if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){
+      const age=Date.now()-ts;
+      if(age>STALE_MS&&!ls.monitor_stale_notified){
+        try{await push(["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],false)}
+        catch(err){await lineError("監視停止疑い通知失敗: "+err)}
+        ls.monitor_stale_notified=true;
+      }else if(age<=STALE_MS&&ls.monitor_stale_notified){
+        // 正常な再開そのものは通知しない。次回の停止判定に備えてフラグだけ解除する。
+        ls.monitor_stale_notified=false;
+      }
+    }
+  }
   if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
 }
 addEventListener("fetch",event=>event.respondWith((async()=>{const u=new URL(event.request.url);if(event.request.method==="GET"&&u.pathname==="/")return json({ok:true,service:"toss-line-bot"});if(event.request.method==="GET"&&u.pathname==="/health")return json({ok:true,service:"toss-line-bot",kv_bound:typeof TOSS_KV!=="undefined",line_secret_configured:typeof LINE_CHANNEL_SECRET!=="undefined"&&!!LINE_CHANNEL_SECRET,line_access_token_configured:typeof LINE_CHANNEL_ACCESS_TOKEN!=="undefined"&&!!LINE_CHANNEL_ACCESS_TOKEN,allowed_user_configured:typeof LINE_ALLOWED_USER_ID!=="undefined"&&!!LINE_ALLOWED_USER_ID});if(event.request.method!=="POST"||u.pathname!=="/callback")return new Response("Not Found",{status:404});const len=Number(event.request.headers.get("content-length")||0);if(len<=0||len>MAX_BODY)return new Response("Payload Too Large",{status:413});const body=await event.request.text();if(new TextEncoder().encode(body).length>MAX_BODY||!(await verify(body,event.request.headers.get("x-line-signature")||"")))return new Response("Bad Request",{status:400});let data;try{data=JSON.parse(body)}catch{return new Response("Bad Request",{status:400})}if(!Array.isArray(data.events))return new Response("Bad Request",{status:400});if(!data.events.length)return new Response("OK");if(["2026-10-16","2026-10-17"].includes(today()))return new Response("OK");event.waitUntil(webhook(data));return new Response("OK")})()));
