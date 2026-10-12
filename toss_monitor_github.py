@@ -84,6 +84,32 @@ def state_contents_equal(a, b):
     )
 
 
+def is_final_pre_night_success(runtime):
+    """夜間停止開始前15分以内に成功取得済みなら、予定停止に切り替える。"""
+    jst = timezone(timedelta(hours=9))
+    now_jst = datetime.now(jst)
+    if now_jst.hour != 0:
+        return False
+
+    pause_start = now_jst.replace(hour=1, minute=0, second=0, microsecond=0)
+    raw_success_at = runtime.get("last_success_at") if isinstance(runtime, dict) else None
+    if not raw_success_at:
+        return False
+
+    try:
+        success_at = datetime.fromisoformat(
+            str(raw_success_at).replace("Z", "+00:00").replace(" ", "T")
+        )
+        if success_at.tzinfo is None:
+            success_at = success_at.replace(tzinfo=jst)
+        else:
+            success_at = success_at.astimezone(jst)
+    except (TypeError, ValueError):
+        return False
+
+    return pause_start - timedelta(minutes=15) <= success_at < pause_start
+
+
 def is_first_post_night_scan(previous_state):
     if not isinstance(previous_state, dict):
         return True
@@ -201,13 +227,38 @@ def main():
         write_local_state(previous_state)
         print(f"KVから前回状態を復元しました: statuses={len(previous_state['statuses'])}")
 
+    night_pause_interrupted = False
     try:
         with sync_playwright() as playwright:
             monitor.scan_once(playwright)
+    except monitor.MaintenanceWindowError as exc:
+        # 01:00をまたぐなど、予定された夜間停止に入った場合は正常停止として記録。
+        night_pause_interrupted = True
+        now_jst = datetime.now(timezone(timedelta(hours=9)))
+        until_jst = now_jst.replace(
+            hour=7, minute=0, second=0, microsecond=0
+        )
+        monitor.save_runtime({
+            "monitor_status": "maintenance",
+            "maintenance_reason": str(exc),
+            "maintenance_until": until_jst.isoformat(),
+            "last_scan_finished_at": monitor.now_iso(),
+            "errors": {
+                "TOSS取得エラー": None,
+                "お知らせ取得エラー": None,
+                "TOSSページ構造エラー": None,
+                "状態ファイルエラー": None,
+            },
+        })
+        print(f"予定された夜間停止のため監視を正常終了します: {exc}")
     finally:
         runtime = monitor.load_runtime()
         if runtime:
             save_runtime_to_cloudflare(runtime)
+
+    if night_pause_interrupted:
+        print("前回の正常なTOSS状態を保持し、状態の更新は行いません。")
+        return
 
     runtime = monitor.load_runtime()
     if runtime.get("monitor_status") != "ok":
@@ -221,6 +272,30 @@ def main():
         save_state_to_cloudflare(current_state)
     else:
         print("TOSS state保存スキップ: 前回と同一内容です。")
+
+    runtime = monitor.load_runtime()
+    if is_final_pre_night_success(runtime):
+        now_jst = datetime.now(timezone(timedelta(hours=9)))
+        until_jst = now_jst.replace(hour=7, minute=0, second=0, microsecond=0)
+        monitor.save_runtime({
+            "monitor_status": "maintenance",
+            "maintenance_reason": (
+                "夜間停止前15分以内の正常取得を完了したため、"
+                "予定どおり監視を停止します。"
+            ),
+            "maintenance_until": until_jst.isoformat(),
+            "errors": {
+                "TOSS取得エラー": None,
+                "お知らせ取得エラー": None,
+                "TOSSページ構造エラー": None,
+                "状態ファイルエラー": None,
+            },
+        })
+        save_runtime_to_cloudflare(monitor.load_runtime())
+        print(
+            "夜間停止前15分以内の正常取得を確認しました。"
+            "今回の取得を最後にし、07:00まで予定停止します。"
+        )
 
     print(
         "TOSS取得 完了: "
