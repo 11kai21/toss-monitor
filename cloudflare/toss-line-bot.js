@@ -159,7 +159,10 @@ async function scheduledTask(){
     // 予定された停止は異常停止として扱わず、以前の停止疑い通知フラグも黙って解除する。
     ls.monitor_stale_notified=false;
   }else{
-    const last=r.last_scan_started_at||r.updated_at,ts=Date.parse(last||"");
+    // 起動/取得中は前夜の最終取得時刻を使わず、今回の実行開始時刻で停止を判定する。
+    const cycleActive=r.monitor_status==="starting"||r.monitor_status==="running";
+    const last=cycleActive?(r.process_started_at||r.last_scan_started_at||r.updated_at):(r.last_scan_started_at||r.updated_at);
+    const ts=Date.parse(last||"");
     if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){
       const age=Date.now()-ts;
       if(age>STALE_MS&&!ls.monitor_stale_notified){
