@@ -80,8 +80,37 @@ jobs:
         if: always() && steps.pause.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TOSS_API_TOKEN: ${{ secrets.TOSS_API_TOKEN }}
         run: |
           set -euo pipefail
+
+          # 予定された夜間停止中は、次のRunを連鎖起動しない。
+          jst_hour="$(TZ=Asia/Tokyo date +%H)"
+          if (( 10#${jst_hour} >= 1 && 10#${jst_hour} < 7 )); then
+            echo "01:00～07:00 JSTの予定停止中です。次回Runは起動しません。"
+            exit 0
+          fi
+
+          # 直前の取得が停止開始前15分以内なら、それを最終取得として終了。
+          # 最終取得後にruntimeをmaintenanceへ切り替えるのはPythonブリッジ側。
+          runtime_json="{}"
+          if fetched_runtime="$(curl --fail --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -H "Accept: application/json" \
+            -H "X-TOSS-API-Token: ${TOSS_API_TOKEN}" \
+            "https://toss-monitor-api.nbakaikai.workers.dev/api/runtime")"; then
+            runtime_json="${fetched_runtime}"
+          else
+            echo "runtime確認に失敗しました。予定停止と誤判定せず、次回起動を継続します。"
+          fi
+
+          runtime_status="$(jq -r '.monitor_status // empty' <<<"${runtime_json}")"
+          maintenance_reason="$(jq -r '.maintenance_reason // empty' <<<"${runtime_json}")"
+          if [[ "${runtime_status}" == "maintenance" && "${maintenance_reason}" == *"夜間停止"* ]]; then
+            echo "夜間停止前の最終取得、または予定された夜間停止を確認しました。次回Runは起動しません。"
+            exit 0
+          fi
+
           start="${CYCLE_START:-$(date +%s)}"
           now="$(date +%s)"
           elapsed=$((now - start))
@@ -92,5 +121,13 @@ jobs:
           else
             echo "取得処理が5分を超えたため待機なし"
           fi
+
+          # 待機中に01:00へ達した場合も連鎖を止める。
+          jst_hour="$(TZ=Asia/Tokyo date +%H)"
+          if (( 10#${jst_hour} >= 1 && 10#${jst_hour} < 7 )); then
+            echo "待機中に夜間停止時間へ入ったため、次回Runは起動しません。"
+            exit 0
+          fi
+
           gh api --silent -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/toss-monitor-production.yml/dispatches" -f ref=main
           echo "次回TOSS Monitor runを起動しました"
