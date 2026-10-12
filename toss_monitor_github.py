@@ -88,9 +88,8 @@ def is_final_pre_night_success(runtime):
     """夜間停止開始前15分以内に成功取得済みなら、予定停止に切り替える。"""
     jst = timezone(timedelta(hours=9))
     now_jst = datetime.now(jst)
-    if now_jst.hour != 0:
-        return False
-
+    # 判定対象は現在時刻ではなく、今日01:00に対する最終正常取得時刻。
+    # 01:00を数秒過ぎてブリッジ処理が終わった場合も、直前の成功を見落とさない。
     pause_start = now_jst.replace(hour=1, minute=0, second=0, microsecond=0)
     raw_success_at = runtime.get("last_success_at") if isinstance(runtime, dict) else None
     if not raw_success_at:
