@@ -1,9 +1,7 @@
 name: TOSS Preflight Validation
 
 on:
-  # 一時検証：LINE通知修正の構文・回帰チェック用。
-  push:
-    branches: [main]
+  # 本番化時に push / pull_request を復活させる。
   workflow_dispatch:
 
 permissions:
