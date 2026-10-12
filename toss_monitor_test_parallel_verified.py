@@ -2068,6 +2068,10 @@ def scan_once(playwright):
                 )
                 results_by_date[date_str] = facilities
                 trace(f"日付取得完了: {date_str}")
+            except MaintenanceWindowError:
+                # 日次の夜間停止は予定された停止。取得エラーとして集計せず、
+                # 1回取得用ブリッジ側で正常な停止状態として処理する。
+                raise
             except Exception as exc:
                 errors_by_date[date_str] = f"{type(exc).__name__}: {exc}"
                 trace(
