@@ -49,8 +49,13 @@ async function dayMsg(s,d){
 }
 async function lineApi(path,body){if(typeof LINE_CHANNEL_ACCESS_TOKEN==="undefined"||!LINE_CHANNEL_ACCESS_TOKEN)throw Error("LINE_CHANNEL_ACCESS_TOKENが未設定です。");const r=await fetch("https://api.line.me"+path,{method:"POST",headers:{"Authorization":"Bearer "+LINE_CHANNEL_ACCESS_TOKEN,"Content-Type":"application/json"},body:JSON.stringify(body)});const t=await r.text();if(!r.ok)throw Error("LINE API HTTP "+r.status+": "+t.slice(0,400));return t?JSON.parse(t):{};}
 async function reply(t,msgs){if(!t)return;await lineApi("/v2/bot/message/reply",{replyToken:t,messages:msgs.slice(0,5).map(x=>typeof x==="string"?{type:"text",text:x.slice(0,5000)}:x)});}
-async function push(msgs,silent){if(typeof LINE_ALLOWED_USER_ID==="undefined"||!LINE_ALLOWED_USER_ID)throw Error("LINE_ALLOWED_USER_IDが未設定です。");await lineApi("/v2/bot/message/push",{to:LINE_ALLOWED_USER_ID,messages:msgs.slice(0,5).map(x=>typeof x==="string"?{type:"text",text:x.slice(0,5000)}:x),notificationDisabled:silent===true});const s=await lineState();s.last_line_send_at=nowIso();s.last_line_error=null;await saveLine(s);}
+async function push(msgs,silent){if(typeof LINE_ALLOWED_USER_ID==="undefined"||!LINE_ALLOWED_USER_ID)throw Error("LINE_ALLOWED_USER_IDが未設定です。");await lineApi("/v2/bot/message/push",{to:LINE_ALLOWED_USER_ID,messages:msgs.filter(x=>x!=="").slice(0,5).map(x=>typeof x==="string"?{type:"text",text:x.slice(0,5000)}:x),notificationDisabled:silent===true});const s=await lineState();s.last_line_send_at=nowIso();s.last_line_error=null;await saveLine(s);}
 async function lineError(msg){try{const s=await lineState();s.last_line_error=String(msg).slice(0,1500);await saveLine(s);}catch{}}
+// 定期処理用の送信。送信結果は最後に保存するlsへ書き、エラー記録が上書きで消えないようにする。
+// 失敗時はKVへ直接書かない（同じエラーの再試行が続いてもKV書き込みが増えないようにするため）。
+async function notify(ls,msgs,errLabel){try{for(let i=0;i<msgs.length;i+=5)await push(msgs.slice(i,i+5),false);ls.last_line_send_at=nowIso();ls.last_line_error=null;return true}catch(err){ls.last_line_error=String(errLabel+": "+err).slice(0,1500);return false}}
+// 空き化通知は空文字のメッセージを作らず1通にまとめ、5000文字を超える場合だけ枠の区切りで分割する。
+function vacancyMessages(state,changes){const head="===== 空きが出ました =====\n最終取得："+fresh(state.saved_at),out=[];let cur=head;for(const x of changes){const b="■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL;if((cur+"\n\n"+b).length>5000){out.push(cur);cur=b;}else cur+="\n\n"+b;}out.push(cur);return out;}
 function picker(title,data,min,max,step,labelText,color){return{type:"flex",altText:title+"（"+min+"～"+max+"）",contents:{type:"bubble",size:"kilo",header:{type:"box",layout:"horizontal",backgroundColor:color,paddingAll:"16px",contents:[{type:"text",text:step,color:"#FFFFFF",weight:"bold",size:"sm",flex:0},{type:"text",text:labelText,color:"#FFFFFF",weight:"bold",size:"lg",align:"end",flex:1}]},body:{type:"box",layout:"vertical",paddingAll:"20px",contents:[{type:"text",text:title,size:"lg",weight:"bold",wrap:true},{type:"text",text:"選択可能\n"+min+" ～ "+max,size:"sm",wrap:true,margin:"md"}]},footer:{type:"box",layout:"vertical",spacing:"sm",paddingAll:"16px",contents:[{type:"button",style:"primary",color:color,action:{type:"datetimepicker",label:data.indexOf("_end")>=0?"終了日を選択":"開始日を選択",data:data,mode:"date",min:min,max:max}},{type:"button",style:"secondary",action:{type:"postback",label:"← トップメニュー",data:"menu=top"}}]}}};}
 async function operation(feature,step,start){const s=await lineState();s.operation={feature:feature,step:step,start_date:start||null,expires_at:new Date(Date.now()+600000).toISOString()};await saveLine(s);}
 async function clearOp(s){const x=s||await lineState(),before=JSON.stringify(x.operation||{}),empty={feature:null,step:null,start_date:null,expires_at:null};if(before===JSON.stringify(empty))return x;x.operation=empty;return saveLine(x);}
@@ -104,8 +109,7 @@ async function scheduledTask(){
   const currentDay=today();
   const windowState=refreshMonitoringWindow(ls,currentDay);
   if(windowState.ended){
-    try{await push(["監視期間が終了しました。\n期間："+windowState.previous_start.replaceAll("-","/")+" ～ "+windowState.previous_end.replaceAll("-","/")],false)}
-    catch(err){await lineError("監視終了通知失敗: "+err)}
+    await notify(ls,["監視期間が終了しました。\n期間："+windowState.previous_start.replaceAll("-","/")+" ～ "+windowState.previous_end.replaceAll("-","/")],"監視終了通知失敗");
     ls.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};
     ls.last_seen_state_saved_at=null;
     await setConfig(false);
@@ -123,11 +127,11 @@ async function scheduledTask(){
   const runtimeReady=r.monitor_status!=="starting"&&r.monitor_status!=="running";
   if(r.monitor_status!=="maintenance"&&runtimeReady&&Number.isFinite(en)&&Number.isFinite(ru)&&ru>=en){
     if(hasRuntimeErrors){
-      if(!hadRuntimeErrors)try{await push(["TOSS監視でエラーを検知しました。",es],false)}catch(err){await lineError("TOSSエラー通知失敗: "+err)}
+      if(!hadRuntimeErrors)await notify(ls,["TOSS監視でエラーを検知しました。",es],"TOSSエラー通知失敗");
       // エラー内容が変化しても、継続中の同一障害として1回だけ通知する。
       ls.last_toss_runtime_signature=es;
     }else{
-      if(hadRuntimeErrors)try{await push(["TOSS監視が正常状態に復旧しました。"],false)}catch(err){await lineError("復旧通知失敗: "+err)}
+      if(hadRuntimeErrors)await notify(ls,["TOSS監視が正常状態に復旧しました。"],"復旧通知失敗");
       // 旧版で保存された空オブジェクト"{}"も、復旧通知せず静かに解除する。
       ls.last_toss_runtime_signature=null;
     }
@@ -147,10 +151,14 @@ async function scheduledTask(){
         const changes=[];
         for(const[k,v]of Object.entries(currentState.statuses||{})){if(!v||v.status!=="空き")continue;const p=k.split("|"),dd=p[0],d2=dateOk(dd)?dd:null;if(!d2||d2<st||d2>ed)continue;const old=prev.statuses?.[k];if(!old||old.status==="空き")continue;changes.push({date:dd,facility:v.facility||"不明",item:v.item||"不明",time_name:v.time_name||p[2],card_no:v.card_no==null?p[1]:v.card_no,from:old.status});}
         changes.sort((a,b)=>[a.date,hour(a.time_name)??99,Number(a.card_no)||9999,a.time_name].join("|").localeCompare([b.date,hour(b.time_name)??99,Number(b.card_no)||9999,b.time_name].join("|")));
-        if(changes.length){const sig=btoa(unescape(encodeURIComponent(JSON.stringify(changes))));if(sig!==ls.last_toss_alert_signature){try{await push(["===== 空きが出ました =====","最終取得："+fresh(currentState.saved_at),"",...changes.map(x=>"■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL)],false);ls.last_toss_alert_signature=sig}catch(err){await lineError("空き化通知失敗: "+err)}}}
+        let delivered=true;
+        if(changes.length){const sig=btoa(unescape(encodeURIComponent(JSON.stringify(changes))));if(sig!==ls.last_toss_alert_signature){delivered=await notify(ls,vacancyMessages(currentState,changes),"空き化通知失敗");if(delivered)ls.last_toss_alert_signature=sig;}}
         else ls.last_toss_alert_signature=null;
-        ls.last_seen_state_saved_at=saved;
-        if(firstPostNightState)ls.night_baseline_date=currentDay;
+        // 送信に失敗した状態は比較済みにせず、次回の定期処理で同じ比較・通知をやり直す。
+        if(delivered){
+          ls.last_seen_state_saved_at=saved;
+          if(firstPostNightState)ls.night_baseline_date=currentDay;
+        }
       }
     }
   }
@@ -166,8 +174,7 @@ async function scheduledTask(){
     if(Number.isFinite(ts)&&(!Number.isFinite(en)||ts>=en)){
       const age=Date.now()-ts;
       if(age>STALE_MS&&!ls.monitor_stale_notified){
-        try{await push(["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],false)}
-        catch(err){await lineError("監視停止疑い通知失敗: "+err)}
+        await notify(ls,["TOSS監視停止の可能性があります。\n最終監視開始："+fresh(last)+"\n現在の状態から詳細を確認してください。"],"監視停止疑い通知失敗");
         ls.monitor_stale_notified=true;
       }else if(age<=STALE_MS&&ls.monitor_stale_notified){
         // 正常な再開そのものは通知しない。次回の停止判定に備えてフラグだけ解除する。
