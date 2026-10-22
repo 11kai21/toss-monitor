@@ -13,6 +13,10 @@ const MAX_BODY = 262144;
 const STALE_MS = 1200000;
 const NIGHT_PAUSE_START_HOUR = 1;
 const NIGHT_PAUSE_END_HOUR = 7;
+const GITHUB_REPO = "11kai21/toss-monitor";
+const PRODUCTION_WORKFLOW = "toss-monitor-production.yml";
+const RESTART_KEY = "toss_restart_state";
+const RECOVERY_MS = 720000;
 
 function json(data,status){return new Response(JSON.stringify(data),{status:status||200,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});}
 function nowIso(){return new Date().toISOString();}
@@ -97,6 +101,28 @@ function refreshMonitoringWindow(s,currentDay){
   if(currentDay>ed)return{active:false,ended:true,changed:false,previous_start:st,previous_end:ed};
   if(st<currentDay){m.start_date=currentDay;return{active:true,ended:false,changed:true,previous_start:st,previous_end:ed};}
   return{active:true,ended:false,changed:false,previous_start:st,previous_end:ed};
+}
+async function githubApi(method,path,body){const r=await fetch("https://api.github.com/repos/"+GITHUB_REPO+path,{method:method,headers:{"Authorization":"Bearer "+GITHUB_DISPATCH_TOKEN,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"toss-line-bot"},body:body?JSON.stringify(body):undefined});const t=await r.text();if(!r.ok)throw Error("GitHub API HTTP "+r.status+": "+t.slice(0,300));return t?JSON.parse(t):{};}
+// GitHubの時刻指定実行は1時間以上遅れることがあるため、Cloudflare Cronから本番の朝の再開・停止時の復旧起動を行う。
+// 判定条件はWatchdogと同じ（夜間停止・メンテナンス中は起動しない、最終正常取得から12分以上、本番Runが動いていない）。
+// GITHUB_DISPATCH_TOKENが未設定の間は何もしない。KVへは起動した時とエラー内容が変わった時だけ書く。
+async function restartTask(){
+  if(typeof GITHUB_DISPATCH_TOKEN==="undefined"||!GITHUB_DISPATCH_TOKEN)return;
+  const day=today(),jstParts=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",hour:"2-digit",hourCycle:"h23"}).formatToParts(new Date()),jstHour=Number(jstParts.find(x=>x.type==="hour")?.value??"99");
+  if(jstHour>=NIGHT_PAUSE_START_HOUR&&jstHour<NIGHT_PAUSE_END_HOUR)return;
+  const r=await runtime(),now=Date.now();
+  const mu=Date.parse(r.maintenance_until||"");if(Number.isFinite(mu)&&mu>now)return;
+  if(Array.isArray(r.maintenance_dates)&&r.maintenance_dates.includes(day))return;
+  for(const w of Array.isArray(r.system_maintenance_windows)?r.system_maintenance_windows:[]){const a=Date.parse(w?.start||""),b=Date.parse(w?.end||"");if(Number.isFinite(a)&&Number.isFinite(b)&&a<=now&&now<b)return;}
+  const ls=Date.parse(r.last_success_at||"");if(Number.isFinite(ls)&&now-ls<RECOVERY_MS)return;
+  let st={};try{st=await read(RESTART_KEY,{})||{}}catch{}const before=JSON.stringify(st);
+  try{
+    const runs=await githubApi("GET","/actions/workflows/"+PRODUCTION_WORKFLOW+"/runs?per_page=20");
+    if((runs.workflow_runs||[]).some(x=>x.status!=="completed"))return;
+    await githubApi("POST","/actions/workflows/"+PRODUCTION_WORKFLOW+"/dispatches",{ref:"main"});
+    st={...st,last_dispatch_at:nowIso(),last_dispatch_reason:Number.isFinite(ls)?"最終正常取得から"+Math.floor((now-ls)/60000)+"分":"最終正常取得なし",last_error:null};
+  }catch(err){st={...st,last_error:String(err).slice(0,500)};}
+  if(JSON.stringify(st)!==before)await TOSS_KV.put(RESTART_KEY,JSON.stringify(st));
 }
 async function scheduledTask(){
   if(["2026-10-16","2026-10-17"].includes(today()))return;
@@ -184,5 +210,6 @@ async function scheduledTask(){
   }
   if(JSON.stringify(ls)!==scheduledStateBefore)await saveLine(ls);
 }
-addEventListener("fetch",event=>event.respondWith((async()=>{const u=new URL(event.request.url);if(event.request.method==="GET"&&u.pathname==="/")return json({ok:true,service:"toss-line-bot"});if(event.request.method==="GET"&&u.pathname==="/health")return json({ok:true,service:"toss-line-bot",kv_bound:typeof TOSS_KV!=="undefined",line_secret_configured:typeof LINE_CHANNEL_SECRET!=="undefined"&&!!LINE_CHANNEL_SECRET,line_access_token_configured:typeof LINE_CHANNEL_ACCESS_TOKEN!=="undefined"&&!!LINE_CHANNEL_ACCESS_TOKEN,allowed_user_configured:typeof LINE_ALLOWED_USER_ID!=="undefined"&&!!LINE_ALLOWED_USER_ID});if(event.request.method!=="POST"||u.pathname!=="/callback")return new Response("Not Found",{status:404});const len=Number(event.request.headers.get("content-length")||0);if(len<=0||len>MAX_BODY)return new Response("Payload Too Large",{status:413});const body=await event.request.text();if(new TextEncoder().encode(body).length>MAX_BODY||!(await verify(body,event.request.headers.get("x-line-signature")||"")))return new Response("Bad Request",{status:400});let data;try{data=JSON.parse(body)}catch{return new Response("Bad Request",{status:400})}if(!Array.isArray(data.events))return new Response("Bad Request",{status:400});if(!data.events.length)return new Response("OK");if(["2026-10-16","2026-10-17"].includes(today()))return new Response("OK");event.waitUntil(webhook(data));return new Response("OK")})()));
-addEventListener("scheduled",event=>event.waitUntil(scheduledTask()));
+addEventListener("fetch",event=>event.respondWith((async()=>{const u=new URL(event.request.url);if(event.request.method==="GET"&&u.pathname==="/")return json({ok:true,service:"toss-line-bot"});if(event.request.method==="GET"&&u.pathname==="/health")return json({ok:true,service:"toss-line-bot",kv_bound:typeof TOSS_KV!=="undefined",line_secret_configured:typeof LINE_CHANNEL_SECRET!=="undefined"&&!!LINE_CHANNEL_SECRET,line_access_token_configured:typeof LINE_CHANNEL_ACCESS_TOKEN!=="undefined"&&!!LINE_CHANNEL_ACCESS_TOKEN,allowed_user_configured:typeof LINE_ALLOWED_USER_ID!=="undefined"&&!!LINE_ALLOWED_USER_ID,github_dispatch_configured:typeof GITHUB_DISPATCH_TOKEN!=="undefined"&&!!GITHUB_DISPATCH_TOKEN});if(event.request.method!=="POST"||u.pathname!=="/callback")return new Response("Not Found",{status:404});const len=Number(event.request.headers.get("content-length")||0);if(len<=0||len>MAX_BODY)return new Response("Payload Too Large",{status:413});const body=await event.request.text();if(new TextEncoder().encode(body).length>MAX_BODY||!(await verify(body,event.request.headers.get("x-line-signature")||"")))return new Response("Bad Request",{status:400});let data;try{data=JSON.parse(body)}catch{return new Response("Bad Request",{status:400})}if(!Array.isArray(data.events))return new Response("Bad Request",{status:400});if(!data.events.length)return new Response("OK");if(["2026-10-16","2026-10-17"].includes(today()))return new Response("OK");event.waitUntil(webhook(data));return new Response("OK")})()));
+// 片方が失敗してももう片方は最後まで実行し、失敗はこれまでどおりWorkerのエラーとして残す。
+addEventListener("scheduled",event=>event.waitUntil(Promise.allSettled([scheduledTask(),restartTask()]).then(rs=>{const f=rs.find(x=>x.status==="rejected");if(f)throw f.reason;})));
