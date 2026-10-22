@@ -102,7 +102,21 @@ function refreshMonitoringWindow(s,currentDay){
   if(st<currentDay){m.start_date=currentDay;return{active:true,ended:false,changed:true,previous_start:st,previous_end:ed};}
   return{active:true,ended:false,changed:false,previous_start:st,previous_end:ed};
 }
-async function githubApi(method,path,body){const r=await fetch("https://api.github.com/repos/"+GITHUB_REPO+path,{method:method,headers:{"Authorization":"Bearer "+GITHUB_DISPATCH_TOKEN,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"toss-line-bot"},body:body?JSON.stringify(body):undefined});const t=await r.text();if(!r.ok)throw Error("GitHub API HTTP "+r.status+": "+t.slice(0,300));return t?JSON.parse(t):{};}
+let githubTokenExpiry=null;
+async function githubApi(method,path,body){const r=await fetch("https://api.github.com/repos/"+GITHUB_REPO+path,{method:method,headers:{"Authorization":"Bearer "+GITHUB_DISPATCH_TOKEN,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28","User-Agent":"toss-line-bot"},body:body?JSON.stringify(body):undefined});githubTokenExpiry=r.headers.get("github-authentication-token-expiration")||githubTokenExpiry;const t=await r.text();if(!r.ok)throw Error("GitHub API HTTP "+r.status+": "+t.slice(0,300));return t?JSON.parse(t):{};}
+// GitHub APIの応答ヘッダーにあるトークン有効期限を見て、14・7・3・1・0日前にLINEで1回ずつ知らせる。
+// トークンを作り直して期限が変わると、通知の記録もリセットされる。
+const TOKEN_NOTICE_DAYS = [14,7,3,1,0];
+function parseGithubExpiry(v){const m=String(v||"").trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*(UTC|Z|[+-]\d{2}:?\d{2})?$/);if(!m)return NaN;const tz=!m[3]||m[3]==="UTC"||m[3]==="Z"?"Z":m[3].replace(/^([+-]\d{2})(\d{2})$/,"$1:$2");return Date.parse(m[1]+"T"+m[2]+tz);}
+async function tokenExpiryNotice(st){
+  const exp=parseGithubExpiry(githubTokenExpiry);if(!Number.isFinite(exp))return;
+  st.token_expires_at=new Date(exp).toISOString();
+  const left=Math.ceil((exp-Date.now())/86400000),marks=TOKEN_NOTICE_DAYS.filter(m=>left<=m);if(!marks.length)return;
+  const key=st.token_expires_at+"|"+Math.min(...marks);if(st.token_notice_sent===key)return;
+  const d=new Intl.DateTimeFormat("ja-JP",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(exp));
+  try{await push(["GitHubトークン（GITHUB_DISPATCH_TOKEN）の有効期限が近づいています。\n期限："+d+"（あと"+Math.max(0,left)+"日）\n\n期限が切れると、朝の再開と停止時の復旧起動ができなくなります。GitHubでトークンを再生成し、Cloudflareのシークレットを更新してください。"],false);st.token_notice_sent=key;}
+  catch(err){await lineError("トークン期限通知失敗: "+err)}
+}
 // GitHubの時刻指定実行は1時間以上遅れることがあるため、Cloudflare Cronから本番の朝の再開・停止時の復旧起動を行う。
 // 判定条件はWatchdogと同じ（夜間停止・メンテナンス中は起動しない、最終正常取得から12分以上、本番Runが動いていない）。
 // GITHUB_DISPATCH_TOKENが未設定の間は何もしない。KVへは起動した時とエラー内容が変わった時だけ書く。
@@ -118,10 +132,12 @@ async function restartTask(){
   let st={};try{st=await read(RESTART_KEY,{})||{}}catch{}const before=JSON.stringify(st);
   try{
     const runs=await githubApi("GET","/actions/workflows/"+PRODUCTION_WORKFLOW+"/runs?per_page=20");
-    if((runs.workflow_runs||[]).some(x=>x.status!=="completed"))return;
-    await githubApi("POST","/actions/workflows/"+PRODUCTION_WORKFLOW+"/dispatches",{ref:"main"});
-    st={...st,last_dispatch_at:nowIso(),last_dispatch_reason:Number.isFinite(ls)?"最終正常取得から"+Math.floor((now-ls)/60000)+"分":"最終正常取得なし",last_error:null};
+    if(!(runs.workflow_runs||[]).some(x=>x.status!=="completed")){
+      await githubApi("POST","/actions/workflows/"+PRODUCTION_WORKFLOW+"/dispatches",{ref:"main"});
+      st={...st,last_dispatch_at:nowIso(),last_dispatch_reason:Number.isFinite(ls)?"最終正常取得から"+Math.floor((now-ls)/60000)+"分":"最終正常取得なし",last_error:null};
+    }
   }catch(err){st={...st,last_error:String(err).slice(0,500)};}
+  await tokenExpiryNotice(st);
   if(JSON.stringify(st)!==before)await TOSS_KV.put(RESTART_KEY,JSON.stringify(st));
 }
 async function scheduledTask(){
