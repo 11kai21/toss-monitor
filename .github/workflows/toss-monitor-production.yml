@@ -55,9 +55,32 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # Chromiumのダウンロードが8～10分かかり10分制限で打ち切られることがあるため、
+      # Playwrightの版ごとにブラウザ本体をキャッシュし、ダウンロードを省く。
+      - name: Get Playwright version
+        id: playwright
+        if: steps.pause.outputs.skip != 'true'
+        run: echo "version=$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Chromium cache
+        id: chromium-cache
+        if: steps.pause.outputs.skip != 'true'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # 詰まった時は4分で打ち切り、取得は飛ばして次の5分サイクルへ進む。
       - name: Install Chromium
         if: steps.pause.outputs.skip != 'true'
-        run: python -m playwright install --with-deps chromium
+        timeout-minutes: 4
+        run: |
+          if [[ "${{ steps.chromium-cache.outputs.cache-hit }}" == "true" ]]; then
+            echo "キャッシュ済みのChromiumを使用します。システム依存パッケージのみ確認します。"
+            python -m playwright install-deps chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
 
       - name: Run TOSS monitor once
         if: steps.pause.outputs.skip != 'true'
