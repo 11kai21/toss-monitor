@@ -4,9 +4,7 @@ const CONFIG_KEY = "toss_config";
 const RUNTIME_KEY = "toss_runtime";
 const LINE_STATE_KEY = "toss_line_state";
 const LINE_STATE_BAK_KEY = "toss_line_state_bak";
-// 空き状況画面は直接開けない（ホームへ戻される）ため、目的検索画面を開く。
-// openExternalBrowser=1 でLINE内ではなくSafari等の外部ブラウザで開く。
-const TOSS_URL = "https://www.cm1.eprs.jp/TOSS/web/view/user/rsvPurposeSearch.html?openExternalBrowser=1";
+const TOSS_URL = "https://www.cm1.eprs.jp/TOSS/web/view/user/c005RsvEmptyState.html";
 const DAY_MAX = 13;
 const HOURS = [9,13,17];
 const WD = ["月","火","水","木","金","土","日"];
