@@ -1267,6 +1267,20 @@ def bootstrap_browser_session(playwright):
             save_maintenance_status(reason)
             raise ScheduledMaintenanceError(reason)
 
+        # メンテナンス当日はホーム画面がお知らせ一覧ではなく専用の告知ページに差し替わり、
+        # 上の告知読み取りで当日を判定できない。前回の正常取得で保存した
+        # 定期メンテナンス日に今日が含まれていれば、同じく終日メンテナンスとして扱う。
+        try:
+            cached_dates, _ = load_cached_maintenance(load_state())
+        except Exception:
+            cached_dates = set()
+        if today in cached_dates:
+            reason = (
+                f"前回取得したお知らせで本日（{today.isoformat()}）がTOSS定期メンテナンス実施日と確認済みです。"
+            )
+            save_maintenance_status(reason)
+            raise ScheduledMaintenanceError(reason)
+
         # システムメンテナンスは「告知がある」だけでは停止しない。
         # 実際にTOSSの目的検索・空き状況画面まで開けるかを試し、失敗した場合のみ
         # 現在の告知時間帯と照合してメンテナンス中と判定する。

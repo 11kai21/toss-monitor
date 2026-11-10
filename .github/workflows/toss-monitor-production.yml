@@ -127,8 +127,9 @@ jobs:
             echo "runtime確認に失敗しました。予定停止と誤判定せず、次回起動を継続します。"
           fi
 
-          runtime_status="$(jq -r '.monitor_status // empty' <<<"${runtime_json}")"
-          maintenance_reason="$(jq -r '.maintenance_reason // empty' <<<"${runtime_json}")"
+          # /api/runtime は {"exists":..., "runtime":{...}} の形で返す場合があるため、中身を取り出して判定する。
+          runtime_status="$(jq -r '(.runtime // .) | .monitor_status // empty' <<<"${runtime_json}")"
+          maintenance_reason="$(jq -r '(.runtime // .) | .maintenance_reason // empty' <<<"${runtime_json}")"
           if [[ "${runtime_status}" == "maintenance" && "${maintenance_reason}" == *"夜間停止"* ]]; then
             echo "夜間停止前の最終取得、または予定された夜間停止を確認しました。次回Runは起動しません。"
             exit 0
@@ -136,7 +137,7 @@ jobs:
 
           # TOSSの定期メンテナンス日・システムメンテナンス中は、終了時刻まで連鎖起動しない。
           # 終了後の再開はCloudflareのCron（toss-line-bot）とWatchdogが行う。
-          maintenance_until="$(jq -r '.maintenance_until // empty' <<<"${runtime_json}")"
+          maintenance_until="$(jq -r '(.runtime // .) | .maintenance_until // empty' <<<"${runtime_json}")"
           if [[ "${runtime_status}" == "maintenance" && -n "${maintenance_until}" ]]; then
             maintenance_until_epoch="$(date -d "${maintenance_until}" +%s 2>/dev/null || echo 0)"
             if (( maintenance_until_epoch > $(date +%s) )); then
