@@ -134,6 +134,17 @@ jobs:
             exit 0
           fi
 
+          # TOSSの定期メンテナンス日・システムメンテナンス中は、終了時刻まで連鎖起動しない。
+          # 終了後の再開はCloudflareのCron（toss-line-bot）とWatchdogが行う。
+          maintenance_until="$(jq -r '.maintenance_until // empty' <<<"${runtime_json}")"
+          if [[ "${runtime_status}" == "maintenance" && -n "${maintenance_until}" ]]; then
+            maintenance_until_epoch="$(date -d "${maintenance_until}" +%s 2>/dev/null || echo 0)"
+            if (( maintenance_until_epoch > $(date +%s) )); then
+              echo "TOSSの予定メンテナンス中です（終了: ${maintenance_until}）。次回Runは起動しません。"
+              exit 0
+            fi
+          fi
+
           start="${CYCLE_START:-$(date +%s)}"
           now="$(date +%s)"
           elapsed=$((now - start))

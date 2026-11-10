@@ -227,6 +227,7 @@ def main():
         print(f"KVから前回状態を復元しました: statuses={len(previous_state['statuses'])}")
 
     night_pause_interrupted = False
+    planned_maintenance = False
     try:
         with sync_playwright() as playwright:
             monitor.scan_once(playwright)
@@ -250,12 +251,36 @@ def main():
             },
         })
         print(f"予定された夜間停止のため監視を正常終了します: {exc}")
+    except (
+        monitor.ScheduledMaintenanceError,
+        monitor.ScheduledSystemMaintenanceError,
+    ) as exc:
+        # お知らせで確認できたTOSS本体のメンテナンスは、異常ではなく予定停止として記録する。
+        # 定期メンテナンス日は翌日0:00まで、システムメンテナンスは告知の終了時刻まで。
+        planned_maintenance = True
+        now_jst = datetime.now(timezone(timedelta(hours=9)))
+        until_jst = getattr(exc, "end_time", None) or (
+            now_jst + timedelta(days=1)
+        ).replace(hour=0, minute=0, second=0, microsecond=0)
+        monitor.save_runtime({
+            "monitor_status": "maintenance",
+            "maintenance_reason": str(exc),
+            "maintenance_until": until_jst.isoformat(),
+            "last_scan_finished_at": monitor.now_iso(),
+            "errors": {
+                "TOSS取得エラー": None,
+                "お知らせ取得エラー": None,
+                "TOSSページ構造エラー": None,
+                "状態ファイルエラー": None,
+            },
+        })
+        print(f"TOSSの予定メンテナンスのため監視を正常終了します: {exc}")
     finally:
         runtime = monitor.load_runtime()
         if runtime:
             save_runtime_to_cloudflare(runtime)
 
-    if night_pause_interrupted:
+    if night_pause_interrupted or planned_maintenance:
         print("前回の正常なTOSS状態を保持し、状態の更新は行いません。")
         return
 
