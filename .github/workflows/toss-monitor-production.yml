@@ -70,16 +70,23 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # 詰まった時は4分で打ち切り、取得は飛ばして次の5分サイクルへ進む。
+      # Chromium本体はキャッシュ、無ければダウンロード（必須）。
+      # システム依存パッケージ（apt）の確認は配布サーバーの遅延で詰まることがあるため、
+      # 2分で打ち切り、Runnerに入っている既存の部品のまま監視を続ける。
+      # 全体が4分を超えた場合だけ、取得は飛ばして次の5分サイクルへ進む。
       - name: Install Chromium
         if: steps.pause.outputs.skip != 'true'
         timeout-minutes: 4
         run: |
           if [[ "${{ steps.chromium-cache.outputs.cache-hit }}" == "true" ]]; then
-            echo "キャッシュ済みのChromiumを使用します。システム依存パッケージのみ確認します。"
-            python -m playwright install-deps chromium
+            echo "キャッシュ済みのChromiumを使用します。"
           else
-            python -m playwright install --with-deps chromium
+            python -m playwright install chromium
+          fi
+          if timeout -k 10 120 python -m playwright install-deps chromium; then
+            echo "システム依存パッケージの確認が完了しました。"
+          else
+            echo "::warning::システム依存パッケージの確認が2分以内に終わらなかったため、既存の部品のまま続行します。"
           fi
 
       - name: Run TOSS monitor once
