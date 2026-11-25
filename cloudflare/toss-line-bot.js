@@ -31,6 +31,8 @@ function dateOk(v){if(typeof v!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(v))return
 function addDay(v,n){const a=v.split("-").map(Number);return new Date(Date.UTC(a[0],a[1]-1,a[2])+n*86400000).toISOString().slice(0,10);}
 function weekday(v){const a=v.split("-").map(Number);return (new Date(Date.UTC(a[0],a[1]-1,a[2])).getUTCDay()+6)%7;}
 function label(v){const a=v.split("-");return "▦ "+a[0]+"/"+a[1]+"/"+a[2]+"（"+WD[weekday(v)]+"）";}
+// 表示用の日付（例：2026/11/25（水））。日付として読めない値はそのまま返す。
+function ymdw(v){return dateOk(v)?v.replaceAll("-","/")+"（"+WD[weekday(v)]+"）":String(v);}
 function fresh(v){if(!v)return"取得時刻不明";const d=new Date(v.indexOf("T")>=0?v:v.replace(" ","T")+"+09:00");if(Number.isNaN(d.getTime()))return"取得時刻不明";const m=Math.max(0,Math.floor((Date.now()-d.getTime())/60000));if(m<1)return"1分未満前";if(m<60)return m+"分前";const h=Math.floor(m/60),r=m%60;return h+"時間"+(r?r+"分":"")+"前";}
 async function read(key,fallback){const v=await TOSS_KV.get(key);if(v===null)return fallback;return JSON.parse(v);}
 async function tossState(){let s=null,b=false;try{s=await read(STATE_KEY,null)}catch{}if(!s?.statuses){try{s=await read(STATE_BAK_KEY,null);b=true}catch{}}if(!s?.statuses)throw Error("TOSS状態を読み取れません。");return{state:s,backup:b};}
@@ -61,21 +63,48 @@ async function lineError(msg){try{const s=await lineState();s.last_line_error=St
 // 失敗時はKVへ直接書かない（同じエラーの再試行が続いてもKV書き込みが増えないようにするため）。
 async function notify(ls,msgs,errLabel){try{for(let i=0;i<msgs.length;i+=5)await push(msgs.slice(i,i+5),false);ls.last_line_send_at=nowIso();ls.last_line_error=null;return true}catch(err){ls.last_line_error=String(errLabel+": "+err).slice(0,1500);return false}}
 // 空き化通知は空文字のメッセージを作らず1通にまとめ、5000文字を超える場合だけ枠の区切りで分割する。
-function vacancyMessages(state,changes){const head="===== 空きが出ました =====\n最終取得："+fresh(state.saved_at),out=[];let cur=head;for(const x of changes){const b="■ "+x.date.replaceAll("-","/")+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL;if((cur+"\n\n"+b).length>5000){out.push(cur);cur=b;}else cur+="\n\n"+b;}out.push(cur);return out;}
-function picker(title,data,min,max,step,labelText,color){return{type:"flex",altText:title+"（"+min+"～"+max+"）",contents:{type:"bubble",size:"kilo",header:{type:"box",layout:"horizontal",backgroundColor:color,paddingAll:"16px",contents:[{type:"text",text:step,color:"#FFFFFF",weight:"bold",size:"sm",flex:0},{type:"text",text:labelText,color:"#FFFFFF",weight:"bold",size:"lg",align:"end",flex:1}]},body:{type:"box",layout:"vertical",paddingAll:"20px",contents:[{type:"text",text:title,size:"lg",weight:"bold",wrap:true},{type:"text",text:"選択可能\n"+min+" ～ "+max,size:"sm",wrap:true,margin:"md"}]},footer:{type:"box",layout:"vertical",spacing:"sm",paddingAll:"16px",contents:[{type:"button",style:"primary",color:color,action:{type:"datetimepicker",label:data.indexOf("_end")>=0?"終了日を選択":"開始日を選択",data:data,mode:"date",min:min,max:max}},{type:"button",style:"secondary",action:{type:"postback",label:"← トップメニュー",data:"menu=top"}}]}}};}
+function vacancyMessages(state,changes){const head="===== 空きが出ました =====\n最終取得："+fresh(state.saved_at),out=[];let cur=head;for(const x of changes){const b="■ "+ymdw(x.date)+"\n"+x.facility+" / "+x.item+" / "+x.time_name+"\n前回："+x.from+" → ○\n"+TOSS_URL;if((cur+"\n\n"+b).length>5000){out.push(cur);cur=b;}else cur+="\n\n"+b;}out.push(cur);return out;}
+function picker(title,data,min,max,step,labelText,color){return{type:"flex",altText:title+"（"+min+"～"+max+"）",contents:{type:"bubble",size:"kilo",header:{type:"box",layout:"horizontal",backgroundColor:color,paddingAll:"16px",contents:[{type:"text",text:step,color:"#FFFFFF",weight:"bold",size:"sm",flex:0},{type:"text",text:labelText,color:"#FFFFFF",weight:"bold",size:"lg",align:"end",flex:1}]},body:{type:"box",layout:"vertical",paddingAll:"20px",contents:[{type:"text",text:title,size:"lg",weight:"bold",wrap:true},{type:"text",text:"選択可能\n"+ymdw(min)+" ～ "+ymdw(max),size:"sm",wrap:true,margin:"md"}]},footer:{type:"box",layout:"vertical",spacing:"sm",paddingAll:"16px",contents:[{type:"button",style:"primary",color:color,action:{type:"datetimepicker",label:data.indexOf("_end")>=0?"終了日を選択":"開始日を選択",data:data,mode:"date",min:min,max:max}},{type:"button",style:"secondary",action:{type:"postback",label:"← トップメニュー",data:"menu=top"}}]}}};}
 // ===== カレンダー（LIFF）で期間を選ぶ =====
 // LIFF画面で開始日・終了日を選ぶと、本人のトークから「📅 監視モード 2026/11/27〜2026/12/03」が送られ、
 // 下のtextMessageが受け取って従来の日付ダイヤルと同じ処理を行う。送信者は従来どおりLINE_ALLOWED_USER_IDだけを受け付ける。
 // LIFF_IDが空の間はカレンダーのボタンを出さず、従来の日付ダイヤルだけを使う。
-function calendarCard(mode,min,max){const title=mode==="monitor"?"監視期間を選択してください":"検索期間を選択してください",dial=mode==="monitor"?"flow=monitor_start":"flow=availability_start";return{type:"flex",altText:title+"（"+min+"～"+max+"）",contents:{type:"bubble",size:"kilo",header:{type:"box",layout:"horizontal",backgroundColor:"#185FA5",paddingAll:"16px",contents:[{type:"text",text:mode==="monitor"?"監視モード":"明日以降の空き",color:"#FFFFFF",weight:"bold",size:"sm",flex:0},{type:"text",text:"期間を選択",color:"#FFFFFF",weight:"bold",size:"lg",align:"end",flex:1}]},body:{type:"box",layout:"vertical",paddingAll:"20px",contents:[{type:"text",text:title,size:"lg",weight:"bold",wrap:true},{type:"text",text:"選択可能\n"+min+" ～ "+max,size:"sm",wrap:true,margin:"md"}]},footer:{type:"box",layout:"vertical",spacing:"sm",paddingAll:"16px",contents:[{type:"button",style:"primary",color:"#185FA5",action:{type:"uri",label:"カレンダーで選ぶ",uri:"https://liff.line.me/"+LIFF_ID+"?mode="+mode}},{type:"button",style:"secondary",action:{type:"datetimepicker",label:"日付ダイヤルで選ぶ",data:dial,mode:"date",min:min,max:max}},{type:"button",style:"secondary",action:{type:"postback",label:"← トップメニュー",data:"menu=top"}}]}}};}
+function calendarCard(mode,min,max){const title=mode==="monitor"?"監視期間を選択してください":"検索期間を選択してください",dial=mode==="monitor"?"flow=monitor_start":"flow=availability_start";return{type:"flex",altText:title+"（"+min+"～"+max+"）",contents:{type:"bubble",size:"kilo",header:{type:"box",layout:"horizontal",backgroundColor:"#185FA5",paddingAll:"16px",contents:[{type:"text",text:mode==="monitor"?"監視モード":"明日以降の空き",color:"#FFFFFF",weight:"bold",size:"sm",flex:0},{type:"text",text:"期間を選択",color:"#FFFFFF",weight:"bold",size:"lg",align:"end",flex:1}]},body:{type:"box",layout:"vertical",paddingAll:"20px",contents:[{type:"text",text:title,size:"lg",weight:"bold",wrap:true},{type:"text",text:"選択可能\n"+ymdw(min)+" ～ "+ymdw(max),size:"sm",wrap:true,margin:"md"}]},footer:{type:"box",layout:"vertical",spacing:"sm",paddingAll:"16px",contents:[{type:"button",style:"primary",color:"#185FA5",action:{type:"uri",label:"カレンダーで選ぶ",uri:"https://liff.line.me/"+LIFF_ID+"?mode="+mode}},{type:"button",style:"secondary",action:{type:"datetimepicker",label:"日付ダイヤルで選ぶ",data:dial,mode:"date",min:min,max:max}},{type:"button",style:"secondary",action:{type:"postback",label:"← トップメニュー",data:"menu=top"}}]}}};}
 function rangeOk(mode,st,ed){const t=today(),max=addDay(t,DAY_MAX),min=mode==="monitor"?t:addDay(t,1);return dateOk(st)&&dateOk(ed)&&st>=min&&ed<=max&&st<=ed;}
-async function startMonitor(token,st,d){const n=await lineState();n.monitoring={enabled:true,start_date:st,end_date:d,enabled_at:nowIso()};n.last_seen_state_saved_at=null;n.last_toss_alert_signature=null;n.last_toss_runtime_signature=null;n.monitor_stale_notified=false;n.operation={feature:null,step:null,start_date:null,expires_at:null};await setConfig(true);await saveLine(n);await reply(token,["監視モードを開始しました。\n期間："+st.replaceAll("-","/")+" ～ "+d.replaceAll("-","/")+"\n\n空き化（○以外→○）を検知したときに通知します。"]);}
+async function startMonitor(token,st,d){const n=await lineState();n.monitoring={enabled:true,start_date:st,end_date:d,enabled_at:nowIso()};n.last_seen_state_saved_at=null;n.last_toss_alert_signature=null;n.last_toss_runtime_signature=null;n.monitor_stale_notified=false;n.operation={feature:null,step:null,start_date:null,expires_at:null};await setConfig(true);await saveLine(n);await reply(token,["監視モードを開始しました。\n期間："+ymdw(st)+" ～ "+ymdw(d)+"\n\n空き化（○以外→○）を検知したときに通知します。"]);}
 async function searchAvailability(token,st,d){const s0=(await tossState()).state,msgs=[];for(let x=st;x<=d;x=addDay(x,1))msgs.push(await dayMsg(s0,x));await reply(token,msgs.slice(0,5));for(let i=5;i<msgs.length;i+=5)try{await push(msgs.slice(i,i+5),true)}catch(err){await lineError("検索結果push失敗: "+err)}await clearOp();}
 async function textMessage(e){
-  const m=String(e.message?.text||"").trim().match(/^📅\s*(監視モード|空き検索)\s*(\d{4})\/(\d{2})\/(\d{2})\s*[〜～~]\s*(\d{4})\/(\d{2})\/(\d{2})$/);if(!m)return;
+  const text=String(e.message?.text||"").trim();
+  if(text===RM_ON||text===RM_OFF){await richMenuSwitch(e.replyToken,text===RM_ON);return;}
+  const dial=text.match(/^📅\s*日付ダイヤル\s*(監視モード|空き検索)$/);
+  if(dial){const t=today(),max=addDay(t,DAY_MAX);if(dial[1]==="監視モード"){await operation("monitor","start");await reply(e.replyToken,[picker("監視開始日を選択してください","flow=monitor_start",t,max,"STEP 1","開始日","#2563EB")]);}else{await operation("availability","start");await reply(e.replyToken,[picker("検索開始日を選択してください","flow=availability_start",addDay(t,1),max,"STEP 1","開始日","#2563EB")]);}return;}
+  const m=text.match(/^📅\s*(監視モード|空き検索)\s*(\d{4})\/(\d{2})\/(\d{2})(?:[（(].[）)])?\s*[〜～~]\s*(\d{4})\/(\d{2})\/(\d{2})(?:[（(].[）)])?$/);if(!m)return;
   const mode=m[1]==="監視モード"?"monitor":"availability",st=m[2]+"-"+m[3]+"-"+m[4],ed=m[5]+"-"+m[6]+"-"+m[7];
   if(!rangeOk(mode,st,ed)){await reply(e.replyToken,["選べる範囲外の期間です。トップメニューからもう一度カレンダーで選んでください。"]);return;}
   if(mode==="monitor")await startMonitor(e.replyToken,st,ed);else await searchAvailability(e.replyToken,st,ed);
+}
+// ===== リッチメニューの「監視モード」「明日以降の空き」をカレンダー直結に切り替える =====
+// 本人がトークで RM_ON を送ると、今のリッチメニューを複製し、2つのボタンだけLIFFのURLを開く動作に変えて差し替える。
+// 文言・配置・画像・他のボタンはそのまま。元のメニューは消さずに残し、RM_OFF で元に戻す。
+const RM_ON = "#リッチメニュー カレンダー直結", RM_OFF = "#リッチメニュー 元に戻す", RM_KEY = "toss_richmenu_switch";
+async function lineReq(url,opt){const o=opt||{},h={"Authorization":"Bearer "+LINE_CHANNEL_ACCESS_TOKEN,...(o.headers||{})};const r=await fetch(url,{method:o.method||"GET",headers:h,body:o.body});if(o.allow404&&r.status===404)return null;if(!r.ok)throw Error("LINE API HTTP "+r.status+": "+(await r.text()).slice(0,300));return r;}
+async function currentRichMenu(){const uid=LINE_ALLOWED_USER_ID;let r=await lineReq("https://api.line.me/v2/bot/user/"+uid+"/richmenu",{allow404:true});if(r)return{id:(await r.json()).richMenuId,perUser:true};r=await lineReq("https://api.line.me/v2/bot/user/all/richmenu",{allow404:true});if(r)return{id:(await r.json()).richMenuId,perUser:false};return null;}
+async function linkRichMenu(id,perUser){if(perUser)await lineReq("https://api.line.me/v2/bot/user/"+LINE_ALLOWED_USER_ID+"/richmenu/"+id,{method:"POST"});else await lineReq("https://api.line.me/v2/bot/user/all/richmenu/"+id,{method:"POST"});}
+async function richMenuSwitch(token,on){
+  try{
+    const cur=await currentRichMenu();if(!cur){await reply(token,["APIで設定されたリッチメニューが見つかりませんでした。何も変更していません。"]);return;}
+    if(!on){const sv=await read(RM_KEY,null);if(!sv?.previous){await reply(token,["元に戻す記録がありません。何も変更していません。"]);return;}await linkRichMenu(sv.previous,sv.perUser===true);await TOSS_KV.put(RM_KEY,JSON.stringify({...sv,active:false,restored_at:nowIso()}));await reply(token,["リッチメニューを元に戻しました。\n「監視モード」「明日以降の空き」は、押すとカードが出る動作に戻ります。"]);return;}
+    const menu=await (await lineReq("https://api.line.me/v2/bot/richmenu/"+cur.id)).json();let n=0;
+    const areas=(menu.areas||[]).map(a=>{const d=a.action?.type==="postback"?a.action.data:null;if(d!=="menu=monitor"&&d!=="menu=availability")return a;n++;const act={type:"uri",uri:"https://liff.line.me/"+LIFF_ID+"?mode="+(d==="menu=monitor"?"monitor":"availability")};if(a.action.label)act.label=a.action.label;return{bounds:a.bounds,action:act};});
+    if(!n){await reply(token,["切り替え対象のボタンが見つかりませんでした（すでにカレンダー直結の可能性があります）。何も変更していません。"]);return;}
+    const img=await lineReq("https://api-data.line.me/v2/bot/richmenu/"+cur.id+"/content"),type=img.headers.get("content-type")||"image/png",buf=await img.arrayBuffer();
+    const body={size:menu.size,selected:menu.selected,name:String(menu.name||"TOSS").slice(0,280)+" calendar",chatBarText:menu.chatBarText,areas};
+    const created=await (await lineReq("https://api.line.me/v2/bot/richmenu",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(),nid=created.richMenuId;
+    try{await lineReq("https://api-data.line.me/v2/bot/richmenu/"+nid+"/content",{method:"POST",headers:{"Content-Type":type},body:buf});await linkRichMenu(nid,cur.perUser);}
+    catch(err){try{await lineReq("https://api.line.me/v2/bot/richmenu/"+nid,{method:"DELETE"})}catch{}throw err;}
+    await TOSS_KV.put(RM_KEY,JSON.stringify({previous:cur.id,current:nid,perUser:cur.perUser,active:true,switched_at:nowIso()}));
+    await reply(token,["リッチメニューを切り替えました。\n「監視モード」「明日以降の空き」を押すと、すぐカレンダーが開きます。\n（反映まで少し時間がかかったり、トークを開き直す必要がある場合があります）\n\n元に戻すときは「"+RM_OFF+"」と送ってください。"]);
+  }catch(err){await lineError("リッチメニュー切替失敗: "+err);await reply(token,["リッチメニューの切り替えに失敗しました。元のメニューのままです。\n"+String(err).slice(0,300)]);}
 }
 function calendarPage(){const t=today();return new Response(CAL_HTML.replace("__TODAY__",t).replace("__MAX__",addDay(t,DAY_MAX)).replace("__LIFF__",LIFF_ID),{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store"}});}
 const CAL_HTML = String.raw`<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>期間を選択</title>
@@ -101,6 +130,8 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-
 .ft button{flex:1;height:46px;border-radius:10px;font-size:15px;border:1px solid #D1D5DB;background:#fff;color:#111827}
 .ft .ok{background:#06C755;border-color:#06C755;color:#fff;font-weight:600}
 .ft .ok:disabled{background:#A7F3D0;border-color:#A7F3D0}
+.alt{text-align:center;padding:0 12px 18px}
+.alt button{background:none;border:none;color:#185FA5;font-size:14px;text-decoration:underline;padding:6px}
 </style></head><body>
 <div class="hd"><b id="ttl">監視モード</b><span id="step">開始日をタップ</span></div>
 <div class="wrap"><div class="mo" id="mo"></div>
@@ -109,6 +140,7 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-
 <div class="lg"><span><i style="background:#185FA5"></i>選んだ日</span><span><i style="background:#E6F1FB;border:1px solid #85B7EB"></i>期間</span><span><i style="background:#E5E7EB"></i>選べない日・休館</span></div>
 <div class="sum" id="sum"></div><div class="err" id="err"></div></div>
 <div class="ft"><button type="button" id="rs">選び直す</button><button type="button" class="ok" id="ok" disabled>この期間で決定</button></div>
+<div class="alt"><button type="button" id="dial">日付ダイヤルで選ぶ</button></div>
 <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
 var TODAY="__TODAY__",MAX="__MAX__",LIFF_ID="__LIFF__",WDS="月火水木金土日";
@@ -133,8 +165,10 @@ function draw(){var g=document.getElementById("gr");g.innerHTML="";var start=add
 document.getElementById("rs").onclick=function(){s=null;e=null;document.getElementById("err").textContent="";draw()};
 document.getElementById("ok").onclick=function(){var er=document.getElementById("err"),btn=this;if(!(s&&e)){er.textContent="開始日と終了日を選んでください";return}
  if(!window.liff||!liff.isInClient()){er.textContent="LINEアプリのトーク画面から開いてください";return}
- var t="📅 "+(mode==="monitor"?"監視モード":"空き検索")+" "+s.replace(/-/g,"/")+"〜"+e.replace(/-/g,"/");btn.disabled=true;
+ var t="📅 "+(mode==="monitor"?"監視モード":"空き検索")+" "+s.replace(/-/g,"/")+"（"+WDS[wd(s)]+"）〜"+e.replace(/-/g,"/")+"（"+WDS[wd(e)]+"）";btn.disabled=true;
  liff.sendMessages([{type:"text",text:t}]).then(function(){liff.closeWindow()}).catch(function(x){er.textContent="送信できませんでした："+(x&&x.message||x);btn.disabled=false})};
+document.getElementById("dial").onclick=function(){var er=document.getElementById("err"),btn=this;if(!window.liff||!liff.isInClient()){er.textContent="LINEアプリのトーク画面から開いてください";return}
+ btn.disabled=true;liff.sendMessages([{type:"text",text:"📅 日付ダイヤル "+(mode==="monitor"?"監視モード":"空き検索")}]).then(function(){liff.closeWindow()}).catch(function(x){er.textContent="送信できませんでした："+(x&&x.message||x);btn.disabled=false})};
 draw();
 if(window.liff&&LIFF_ID)liff.init({liffId:LIFF_ID}).catch(function(x){document.getElementById("err").textContent="LINEとの接続に失敗しました："+(x&&x.message||x)});
 </script></body></html>`;
@@ -156,7 +190,7 @@ async function postback(e){
   if(d==="menu=availability"){const w={today:today()};w.maximum=addDay(w.today,DAY_MAX);await operation("availability","start");await reply(e.replyToken,[LIFF_ID?calendarCard("availability",addDay(w.today,1),w.maximum):picker("検索開始日を選択してください","flow=availability_start",addDay(w.today,1),w.maximum,"STEP 1","開始日","#2563EB")]);return;}
   if(d==="menu=monitor"){const w={today:today()};w.maximum=addDay(w.today,DAY_MAX);await operation("monitor","start");await reply(e.replyToken,[LIFF_ID?calendarCard("monitor",w.today,w.maximum):picker("監視開始日を選択してください","flow=monitor_start",w.today,w.maximum,"STEP 1","開始日","#2563EB")]);return;}
   if(d==="menu=cancel_monitor"){const s=await lineState(),was=!!s.monitoring?.enabled;s.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};s.last_seen_state_saved_at=null;s.last_toss_alert_signature=null;s.last_toss_runtime_signature=null;s.monitor_stale_notified=false;await setConfig(false);await clearOp(s);await reply(e.replyToken,[was?"監視モードをキャンセルしました。\n監視は停止しています。\n必要になったら「監視モード」から再開してください。":"監視モードはすでにキャンセルされています。"]);return;}
-  if(d==="menu=status"){await clearOp();const r=await runtime(),c=await config(),ls=await lineState();let ts={};let bak=false;try{const z=await tossState();ts=z.state;bak=z.backup}catch{}const lines=["===== 現在の状態 =====",ls.monitoring?.enabled?"監視状況：監視中\n期間："+ls.monitoring.start_date+" ～ "+ls.monitoring.end_date:"監視状況：停止中","TOSS監視："+(c.monitor_enabled?"ON":"OFF"),"","エラー状況："];const er=r.errors&&typeof r.errors==="object"?r.errors:{};const errorItems=[];for(const k of ERRORS){const v=k==="LINE送信エラー"?ls.last_line_error:er[k];if(v)errorItems.push("・"+k+"："+(Array.isArray(v)?v.join(" / "):String(v)));}if(bak)errorItems.push("・状態ファイルエラー（TOSS）：本体に問題がありバックアップを使用中");if(!errorItems.length){lines.push("【＝ 現在エラーはありません ＝】");}else{lines.push("【エラーあり】",...errorItems);}lines.push("","メンテナンス情報：");if(r.monitor_status==="maintenance")lines.push("メンテナンス：現在メンテナンス中です。");else{const ds=Array.isArray(ts.maintenance_dates)?ts.maintenance_dates.filter(dateOk):[],w={today:today()};w.maximum=addDay(w.today,DAY_MAX);const sh=ds.filter(x=>x>=w.today&&x<=w.maximum);lines.push(sh.length?"メンテナンス予定："+sh.map(x=>x.replaceAll("-","/")).join(", "):"メンテナンス：現在の告知なし");}lines.push("",r.last_success_at?"TOSS最終正常取得："+fresh(r.last_success_at):"保存済み状態："+fresh(ts.saved_at));await reply(e.replyToken,[lines.join("\n")]);return;}
+  if(d==="menu=status"){await clearOp();const r=await runtime(),c=await config(),ls=await lineState();let ts={};let bak=false;try{const z=await tossState();ts=z.state;bak=z.backup}catch{}const lines=["===== 現在の状態 =====",ls.monitoring?.enabled?"監視状況：監視中\n期間："+ymdw(ls.monitoring.start_date)+" ～ "+ymdw(ls.monitoring.end_date):"監視状況：停止中","TOSS監視："+(c.monitor_enabled?"ON":"OFF"),"","エラー状況："];const er=r.errors&&typeof r.errors==="object"?r.errors:{};const errorItems=[];for(const k of ERRORS){const v=k==="LINE送信エラー"?ls.last_line_error:er[k];if(v)errorItems.push("・"+k+"："+(Array.isArray(v)?v.join(" / "):String(v)));}if(bak)errorItems.push("・状態ファイルエラー（TOSS）：本体に問題がありバックアップを使用中");if(!errorItems.length){lines.push("【＝ 現在エラーはありません ＝】");}else{lines.push("【エラーあり】",...errorItems);}lines.push("","メンテナンス情報：");if(r.monitor_status==="maintenance")lines.push("メンテナンス：現在メンテナンス中です。");else{const ds=Array.isArray(ts.maintenance_dates)?ts.maintenance_dates.filter(dateOk):[],w={today:today()};w.maximum=addDay(w.today,DAY_MAX);const sh=ds.filter(x=>x>=w.today&&x<=w.maximum);lines.push(sh.length?"メンテナンス予定："+sh.map(ymdw).join(", "):"メンテナンス：現在の告知なし");}lines.push("",r.last_success_at?"TOSS最終正常取得："+fresh(r.last_success_at):"保存済み状態："+fresh(ts.saved_at));await reply(e.replyToken,[lines.join("\n")]);return;}
   if(d.indexOf("flow=")===0){await datePostback(e);}
 }
 async function verify(body,sig){
@@ -228,7 +262,7 @@ async function scheduledTask(){
   const currentDay=today();
   const windowState=refreshMonitoringWindow(ls,currentDay);
   if(windowState.ended){
-    await notify(ls,["監視期間が終了しました。\n期間："+windowState.previous_start.replaceAll("-","/")+" ～ "+windowState.previous_end.replaceAll("-","/")],"監視終了通知失敗");
+    await notify(ls,["監視期間が終了しました。\n期間："+ymdw(windowState.previous_start)+" ～ "+ymdw(windowState.previous_end)],"監視終了通知失敗");
     ls.monitoring={enabled:false,start_date:null,end_date:null,enabled_at:null};
     ls.last_seen_state_saved_at=null;
     await setConfig(false);
